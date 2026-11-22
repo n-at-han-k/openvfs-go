@@ -18,13 +18,13 @@ func newTestScanner(t *testing.T, root string, ignored func(string) bool) *Scann
 
 func TestDiff(t *testing.T) {
 	prev := map[string]Meta{
-		"gone.txt": {},
-		"same.txt": {Size: 1},
+		"gone.txt":    {},
+		"same.txt":    {Size: 1},
 		"changed.txt": {Size: 1},
 	}
 	fresh := map[string]Meta{
-		"new.txt":    {Size: 2},
-		"same.txt":   {Size: 1},
+		"new.txt":     {Size: 2},
+		"same.txt":    {Size: 1},
 		"changed.txt": {Size: 2},
 	}
 

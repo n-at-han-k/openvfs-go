@@ -129,13 +129,13 @@ const (
 contentChecksum, contentChecksumTypeId, hasDirtyPlaceholder) 
 VALUES (?1 , ?2, ?3 , ?4 , ?5 , ?6 , ?7,  ?8 , ?9 , ?10, ?11, ?12, ?13);`
 
-	deleteFileRecordQuery   = `DELETE FROM metadata WHERE phash=?1`
-	getFileRecordQuery      = selectFileRecord + `WHERE phash=?1`
-	getFileRecordByInode    = selectFileRecord + `WHERE inode=?1`
-	getFileRecordsByFileId  = selectFileRecord + `WHERE fileid=?1`
-	listFilesInPathQuery    = selectFileRecord + `WHERE parent_hash(path) = ?1 ORDER BY path||'/' ASC`
-	getAllFilesQuery        = selectFileRecord + `ORDER BY path||'/' ASC`
-	getDirtyPlaceholders    = selectFileRecord + `WHERE hasDirtyPlaceholder=TRUE`
+	deleteFileRecordQuery  = `DELETE FROM metadata WHERE phash=?1`
+	getFileRecordQuery     = selectFileRecord + `WHERE phash=?1`
+	getFileRecordByInode   = selectFileRecord + `WHERE inode=?1`
+	getFileRecordsByFileId = selectFileRecord + `WHERE fileid=?1`
+	listFilesInPathQuery   = selectFileRecord + `WHERE parent_hash(path) = ?1 ORDER BY path||'/' ASC`
+	getAllFilesQuery       = selectFileRecord + `ORDER BY path||'/' ASC`
+	getDirtyPlaceholders   = selectFileRecord + `WHERE hasDirtyPlaceholder=TRUE`
 
 	getDownloadInfoQuery = `SELECT tmpfile, etag, errorcount FROM downloadinfo WHERE path=?1`
 	setDownloadInfoQuery = `INSERT OR REPLACE INTO downloadinfo 
@@ -144,9 +144,9 @@ VALUES ( ?1 , ?2, ?3, ?4 )`
 	deleteDownloadInfoQuery = `DELETE FROM downloadinfo WHERE path=?1`
 	getAllDownloadInfoQuery = `SELECT tmpfile, etag, errorcount, path FROM downloadinfo`
 
-	getUploadInfoQuery   = `SELECT size, modtime, contentChecksum, url FROM uploadinfo WHERE path=?1`
+	getUploadInfoQuery    = `SELECT size, modtime, contentChecksum, url FROM uploadinfo WHERE path=?1`
 	getAllUploadInfoQuery = `SELECT size, modtime, contentChecksum, path, url FROM uploadinfo`
-	setUploadInfoQuery   = `INSERT OR REPLACE INTO uploadinfo 
+	setUploadInfoQuery    = `INSERT OR REPLACE INTO uploadinfo 
 (path, size, modtime, contentChecksum, url) 
 VALUES ( ?1 , ?2, ?3 , ?4 , ?5 )`
 
@@ -160,7 +160,7 @@ VALUES ( ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`
 (path, baseFileId, baseModtime, baseEtag, basePath) 
 VALUES (?1, ?2, ?3, ?4, ?5);`
 	getConflictRecordQuery = `SELECT baseFileId, baseModtime, baseEtag, basePath FROM conflicts WHERE path=?1;`
-	deleteConflictQuery     = `DELETE FROM conflicts WHERE path=?1;`
+	deleteConflictQuery    = `DELETE FROM conflicts WHERE path=?1;`
 
 	setSelectiveSyncQuery = `INSERT INTO selectivesync VALUES (?1, ?2)`
 	getSelectiveSyncQuery = `SELECT path FROM selectivesync WHERE type=?1`

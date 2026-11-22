@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"example.com/project/src/directory"
-	"example.com/project/src/fuse"
 )
 
 func main() {
@@ -39,7 +38,7 @@ func main() {
 	socketPath := filepath.Join(os.TempDir(), "openvfs.sock")
 	apiReady := make(chan error, 1)
 	go func() {
-		if err := fuse.ServeAPI(ctx, socketPath, apiReady); err != nil {
+		if err := serveAPI(ctx, socketPath, apiReady); err != nil {
 			log.Printf("socket api: %v", err)
 		}
 	}()
@@ -49,7 +48,7 @@ func main() {
 
 	ready := make(chan error, 1)
 	go func() {
-		if err := fuse.Run(ctx, root, "openvfs:local", socketPath, ready); err != nil {
+		if err := runBackend(ctx, root, "openvfs:local", socketPath, ready); err != nil {
 			log.Printf("openvfs: %v", err)
 		}
 	}()

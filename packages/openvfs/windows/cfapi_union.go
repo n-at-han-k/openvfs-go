@@ -1,0 +1,108 @@
+//go:build windows
+
+package windows
+
+import (
+	"unsafe"
+
+	cf "github.com/deploymenttheory/go-bindings-win32/bindings/win32/storage/cloudfilters"
+)
+
+// The generated bindings expose CF_CALLBACK_PARAMETERS and
+// CF_OPERATION_PARAMETERS as correctly sized and aligned backing storage,
+// leaving the union arms to the caller. These are the two arms the plugin
+// reads and the two it writes, plus the CF_SIZE_OF_OP_PARAM macro from
+// cfapiwrapper.h.
+
+// NTSTATUS values the plugin reports back through CfExecute. They are vars
+// because the failure codes have the high bit set and so are not representable
+// as int32 constants.
+const STATUS_SUCCESS int32 = 0
+
+// ntstatus converts a documented NTSTATUS literal to the int32 the API field
+// holds. It is a function because a constant conversion of a value with the
+// high bit set does not fit int32.
+func ntstatus(v uint32) int32 { return int32(v) }
+
+var (
+	STATUS_CLOUD_FILE_NOT_IN_SYNC   = ntstatus(0xC000CF17)
+	STATUS_CLOUD_FILE_NOT_SUPPORTED = ntstatus(0xC000CF0A)
+)
+
+// cfCallbackParametersFetchData is the FetchData arm of CF_CALLBACK_PARAMETERS.
+type cfCallbackParametersFetchData struct {
+	Flags                 uint32
+	_                     uint32
+	RequiredFileOffset    int64
+	RequiredLength        int64
+	OptionalFileOffset    int64
+	OptionalLength        int64
+	LastDehydrationReason cf.CF_CALLBACK_DEHYDRATION_REASON
+	_                     uint32
+}
+
+// cfCallbackParametersRename is the Rename arm of CF_CALLBACK_PARAMETERS.
+type cfCallbackParametersRename struct {
+	Flags      cf.CF_CALLBACK_RENAME_FLAGS
+	_          uint32
+	TargetPath *uint16
+}
+
+// cfOperationParametersTransferData is the TransferData arm of
+// CF_OPERATION_PARAMETERS.
+type cfOperationParametersTransferData struct {
+	Flags            uint32
+	CompletionStatus int32
+	Buffer           unsafe.Pointer
+	Offset           int64
+	Length           int64
+}
+
+// cfOperationParametersAckRename is the AckRename arm of
+// CF_OPERATION_PARAMETERS.
+type cfOperationParametersAckRename struct {
+	Flags            uint32
+	CompletionStatus int32
+}
+
+func fetchDataArm(p *cf.CF_CALLBACK_PARAMETERS) *cfCallbackParametersFetchData {
+	return (*cfCallbackParametersFetchData)(unsafe.Pointer(&p.Anonymous))
+}
+
+func renameArm(p *cf.CF_CALLBACK_PARAMETERS) *cfCallbackParametersRename {
+	return (*cfCallbackParametersRename)(unsafe.Pointer(&p.Anonymous))
+}
+
+func transferDataArm(p *cf.CF_OPERATION_PARAMETERS) *cfOperationParametersTransferData {
+	return (*cfOperationParametersTransferData)(unsafe.Pointer(&p.Anonymous))
+}
+
+func ackRenameArm(p *cf.CF_OPERATION_PARAMETERS) *cfOperationParametersAckRename {
+	return (*cfOperationParametersAckRename)(unsafe.Pointer(&p.Anonymous))
+}
+
+// The CF_SIZE_OF_OP_PARAM(field) macro:
+//
+//	FIELD_OFFSET(CF_OPERATION_PARAMETERS, field) + FIELD_SIZE(CF_OPERATION_PARAMETERS, field)
+//
+// Every arm starts where the union does, so the offset is the union's.
+var (
+	sizeOfOpParamTransferData = uint32(unsafe.Offsetof(cf.CF_OPERATION_PARAMETERS{}.Anonymous)) +
+		uint32(unsafe.Sizeof(cfOperationParametersTransferData{}))
+	sizeOfOpParamAckRename = uint32(unsafe.Offsetof(cf.CF_OPERATION_PARAMETERS{}.Anonymous)) +
+		uint32(unsafe.Sizeof(cfOperationParametersAckRename{}))
+)
+
+// Compile time guards that each arm still fits the backing storage the
+// bindings allocate for the union. (size-1)/union is 0 exactly while the arm
+// is no larger than the union, so indexing a one element array with it fails
+// to compile the moment an arm outgrows it -- which is the case that would
+// otherwise let the API write past the struct.
+type armFits = [1]struct{}
+
+var (
+	_ = armFits{}[(unsafe.Sizeof(cfCallbackParametersFetchData{})-1)/unsafe.Sizeof(cf.CF_CALLBACK_PARAMETERS{}.Anonymous)]
+	_ = armFits{}[(unsafe.Sizeof(cfCallbackParametersRename{})-1)/unsafe.Sizeof(cf.CF_CALLBACK_PARAMETERS{}.Anonymous)]
+	_ = armFits{}[(unsafe.Sizeof(cfOperationParametersTransferData{})-1)/unsafe.Sizeof(cf.CF_OPERATION_PARAMETERS{}.Anonymous)]
+	_ = armFits{}[(unsafe.Sizeof(cfOperationParametersAckRename{})-1)/unsafe.Sizeof(cf.CF_OPERATION_PARAMETERS{}.Anonymous)]
+)
