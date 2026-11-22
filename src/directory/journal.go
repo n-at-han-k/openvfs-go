@@ -311,4 +311,253 @@ func (j *Journal) DeleteRecord(path string) error {
 	return err
 }
 
+// ---- query-backed methods ------------------------------------------------
+// Each method below uses one of the SQL constants copied from the C++ client.
+
+// DownloadInfo is SyncJournalDb::DownloadInfo.
+type DownloadInfo struct {
+	TmpFile    string
+	Etag       string
+	ErrorCount int
+	Valid      bool
+}
+
+func (j *Journal) DownloadInfo(path string) (DownloadInfo, error) {
+	var out DownloadInfo
+	var tmp, etag sql.NullString
+	var count sql.NullInt64
+	err := j.db.QueryRow(getDownloadInfoQuery, path).Scan(&tmp, &etag, &count)
+	if err == sql.ErrNoRows {
+		return out, nil
+	}
+	if err != nil {
+		return out, err
+	}
+	out = DownloadInfo{TmpFile: tmp.String, Etag: etag.String, ErrorCount: int(count.Int64), Valid: true}
+	return out, nil
+}
+
+func (j *Journal) SetDownloadInfo(path string, info DownloadInfo) error {
+	if !info.Valid {
+		return j.DeleteDownloadInfo(path)
+	}
+	_, err := j.db.Exec(setDownloadInfoQuery, path, info.TmpFile, info.Etag, info.ErrorCount)
+	return err
+}
+
+func (j *Journal) DeleteDownloadInfo(path string) error {
+	_, err := j.db.Exec(deleteDownloadInfoQuery, path)
+	return err
+}
+
+type DownloadInfoWithPath struct {
+	DownloadInfo
+	Path string
+}
+
+func (j *Journal) AllDownloadInfos() ([]DownloadInfoWithPath, error) {
+	rows, err := j.db.Query(getAllDownloadInfoQuery)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []DownloadInfoWithPath
+	for rows.Next() {
+		var tmp, etag, path sql.NullString
+		var count sql.NullInt64
+		if err := rows.Scan(&tmp, &etag, &count, &path); err != nil {
+			return nil, err
+		}
+		out = append(out, DownloadInfoWithPath{
+			DownloadInfo: DownloadInfo{TmpFile: tmp.String, Etag: etag.String, ErrorCount: int(count.Int64), Valid: true},
+			Path:         path.String,
+		})
+	}
+	return out, rows.Err()
+}
+
+// UploadInfo is SyncJournalDb::UploadInfo. The URL is the tus upload URL when
+// resuming a TUS transfer.
+type UploadInfo struct {
+	Size            int64
+	ModTime         int64
+	ContentChecksum string
+	URL             string
+	Path            string
+	Valid           bool
+}
+
+func (j *Journal) UploadInfo(path string) (UploadInfo, error) {
+	var out UploadInfo
+	var size, modtime sql.NullInt64
+	var checksum, url sql.NullString
+	err := j.db.QueryRow(getUploadInfoQuery, path).Scan(&size, &modtime, &checksum, &url)
+	if err == sql.ErrNoRows {
+		return out, nil
+	}
+	if err != nil {
+		return out, err
+	}
+	out = UploadInfo{
+		Size: size.Int64, ModTime: modtime.Int64,
+		ContentChecksum: checksum.String, URL: url.String, Path: path, Valid: true,
+	}
+	return out, nil
+}
+
+func (j *Journal) SetUploadInfo(path string, info UploadInfo) error {
+	if !info.Valid {
+		_, err := j.db.Exec(`DELETE FROM uploadinfo WHERE path=?1`, path)
+		return err
+	}
+	_, err := j.db.Exec(setUploadInfoQuery, path, info.Size, info.ModTime, info.ContentChecksum, info.URL)
+	return err
+}
+
+func (j *Journal) AllUploadInfos() ([]UploadInfo, error) {
+	rows, err := j.db.Query(getAllUploadInfoQuery)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []UploadInfo
+	for rows.Next() {
+		var size, modtime sql.NullInt64
+		var checksum, path, url sql.NullString
+		if err := rows.Scan(&size, &modtime, &checksum, &path, &url); err != nil {
+			return nil, err
+		}
+		out = append(out, UploadInfo{
+			Size: size.Int64, ModTime: modtime.Int64, ContentChecksum: checksum.String,
+			Path: path.String, URL: url.String, Valid: true,
+		})
+	}
+	return out, rows.Err()
+}
+
+// BlacklistEntry is SyncJournalErrorBlacklistRecord.
+type BlacklistEntry struct {
+	Path           string
+	LastTryEtag    string
+	LastTryModtime int64
+	RetryCount     int
+	ErrorString    string
+	LastTryTime    int64
+	IgnoreDuration int64
+	RenameTarget   string
+	ErrorCategory  int
+	RequestID      string
+}
+
+func (j *Journal) ErrorBlacklistEntry(path string) (BlacklistEntry, bool, error) {
+	var out BlacklistEntry
+	var etag, errString sql.NullString
+	var modtime, lastTry, ignoreDuration sql.NullInt64
+	var retries sql.NullInt64
+	err := j.db.QueryRow(getErrorBlacklistQuery, path).Scan(&out.Path, &etag, &modtime, &retries, &errString)
+	if err == sql.ErrNoRows {
+		return out, false, nil
+	}
+	if err != nil {
+		return out, false, err
+	}
+	out.LastTryEtag, out.LastTryModtime = etag.String, modtime.Int64
+	out.RetryCount, out.ErrorString = int(retries.Int64), errString.String
+	out.LastTryTime, out.IgnoreDuration = lastTry.Int64, ignoreDuration.Int64
+	return out, true, nil
+}
+
+func (j *Journal) SetErrorBlacklistEntry(e BlacklistEntry) error {
+	_, err := j.db.Exec(setErrorBlacklistQuery,
+		e.Path, e.LastTryEtag, e.LastTryModtime, e.RetryCount, e.ErrorString,
+		e.LastTryTime, e.IgnoreDuration, e.RenameTarget, e.ErrorCategory, e.RequestID,
+	)
+	return err
+}
+
+func (j *Journal) DeleteErrorBlacklistEntry(path string) error {
+	_, err := j.db.Exec(deleteErrorBlacklistQuery, path)
+	return err
+}
+
+// ConflictRecord is SyncJournalDb::ConflictRecord.
+type ConflictRecord struct {
+	Path        string
+	BaseFileID  string
+	BaseEtag    string
+	BaseModtime int64
+	BasePath    string
+}
+
+func (j *Journal) ConflictRecord(path string) (ConflictRecord, bool, error) {
+	var out ConflictRecord
+	var id, etag, basePath sql.NullString
+	var modtime sql.NullInt64
+	err := j.db.QueryRow(getConflictRecordQuery, path).Scan(&id, &modtime, &etag, &basePath)
+	if err == sql.ErrNoRows {
+		return out, false, nil
+	}
+	if err != nil {
+		return out, false, err
+	}
+	out = ConflictRecord{Path: path, BaseFileID: id.String, BaseEtag: etag.String, BaseModtime: modtime.Int64, BasePath: basePath.String}
+	return out, true, nil
+}
+
+func (j *Journal) SetConflictRecord(r ConflictRecord) error {
+	_, err := j.db.Exec(setConflictRecordQuery, r.Path, r.BaseFileID, r.BaseModtime, r.BaseEtag, r.BasePath)
+	return err
+}
+
+func (j *Journal) DeleteConflictRecord(path string) error {
+	_, err := j.db.Exec(deleteConflictQuery, path)
+	return err
+}
+
+func (j *Journal) SetSelectiveSync(path string, typ int) error {
+	_, err := j.db.Exec(setSelectiveSyncQuery, path, typ)
+	return err
+}
+
+func (j *Journal) SelectiveSync(typ int) ([]string, error) {
+	rows, err := j.db.Query(getSelectiveSyncQuery, typ)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			return nil, err
+		}
+		out = append(out, path)
+	}
+	return out, rows.Err()
+}
+
+type Version struct {
+	Major, Minor, Patch int
+	Custom              string
+}
+
+func (j *Journal) Version() (Version, error) {
+	var out Version
+	var custom sql.NullString
+	err := j.db.QueryRow(getVersionQuery).Scan(&out.Major, &out.Minor, &out.Patch, &custom)
+	if err == sql.ErrNoRows {
+		return out, nil
+	}
+	if err != nil {
+		return out, err
+	}
+	out.Custom = custom.String
+	return out, nil
+}
+
+func (j *Journal) SetVersion(v Version) error {
+	_, err := j.db.Exec(setVersionQuery, v.Major, v.Minor, v.Patch, v.Custom)
+	return err
+}
+
 func (j *Journal) Close() error { return j.db.Close() }
