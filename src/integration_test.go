@@ -16,7 +16,7 @@ func expectEvent(t *testing.T, ch chan directory.Event, scanner *directory.Scann
 	for {
 		select {
 		case ev := <-ch:
-			if ev.Kind == directory.EventPoll {
+			if ev.Kind == directory.Poll {
 				found, err := scanner.Scan()
 				if err != nil {
 					t.Fatal(err)
@@ -69,15 +69,15 @@ func TestIntegrationWatchToChanges(t *testing.T) {
 	if err := os.WriteFile(file, []byte("hi"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	expectEvent(t, events, scanner, directory.EventCreated, "a.txt")
+	expectEvent(t, events, scanner, directory.Create, "a.txt")
 
 	if err := os.WriteFile(file, []byte("much longer content now"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	expectEvent(t, events, scanner, directory.EventModified, "a.txt")
+	expectEvent(t, events, scanner, directory.Write, "a.txt")
 
 	if err := os.Remove(file); err != nil {
 		t.Fatal(err)
 	}
-	expectEvent(t, events, scanner, directory.EventDeleted, "a.txt")
+	expectEvent(t, events, scanner, directory.Remove, "a.txt")
 }

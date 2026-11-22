@@ -57,7 +57,7 @@ func TestScanDiff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0] != (Event{Kind: EventCreated, Path: "a.txt"}) {
+	if len(got) != 1 || got[0] != (Event{Kind: Create, Path: "a.txt"}) {
 		t.Fatalf("first scan = %v, want one created a.txt", got)
 	}
 
@@ -68,7 +68,7 @@ func TestScanDiff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0] != (Event{Kind: EventModified, Path: "a.txt"}) {
+	if len(got) != 1 || got[0] != (Event{Kind: Write, Path: "a.txt"}) {
 		t.Fatalf("second scan = %v, want one modified a.txt", got)
 	}
 
@@ -79,7 +79,7 @@ func TestScanDiff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0] != (Event{Kind: EventDeleted, Path: "a.txt"}) {
+	if len(got) != 1 || got[0] != (Event{Kind: Remove, Path: "a.txt"}) {
 		t.Fatalf("third scan = %v, want one deleted a.txt", got)
 	}
 }

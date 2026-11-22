@@ -75,7 +75,7 @@ func main() {
 		case <-ctx.Done():
 			return
 		case event := <-events:
-			if event.Kind == directory.EventPoll {
+			if event.Kind == directory.Poll {
 				found, err := scanner.Scan()
 				if err != nil {
 					log.Printf("scan failed: %v", err)
@@ -92,16 +92,16 @@ func main() {
 			}
 
 			switch event.Kind {
-			case directory.EventCreated:
-				log.Printf("created %s", event.Path)
-			case directory.EventModified:
-				log.Printf("modified %s", event.Path)
-			case directory.EventDeleted:
-				log.Printf("deleted %s", event.Path)
-			case directory.EventRenamed:
-				log.Printf("renamed %s", event.Path)
-			case directory.EventRescan:
-				log.Print("events lost, full rescan")
+			case directory.Create:
+				// TODO: handle create
+			case directory.Write:
+				// TODO: handle write
+			case directory.Remove:
+				// TODO: handle removal
+			case directory.Rename:
+				// TODO: handle rename
+			case directory.Chmod:
+				// TODO: handle attribute change
 			}
 		}
 	}

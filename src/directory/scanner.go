@@ -79,14 +79,14 @@ func calculateDiff(prev, fresh map[string]Meta) Diff {
 		old, ok := prev[path]
 		switch {
 		case !ok:
-			diff.Added = append(diff.Added, Event{Kind: EventCreated, Path: path})
+			diff.Added = append(diff.Added, Event{Kind: Create, Path: path})
 		case old != m:
-			diff.Modified = append(diff.Modified, Event{Kind: EventModified, Path: path})
+			diff.Modified = append(diff.Modified, Event{Kind: Write, Path: path})
 		}
 	}
 	for path := range prev {
 		if _, ok := fresh[path]; !ok {
-			diff.Removed = append(diff.Removed, Event{Kind: EventDeleted, Path: path})
+			diff.Removed = append(diff.Removed, Event{Kind: Remove, Path: path})
 		}
 	}
 	return diff

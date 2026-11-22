@@ -15,7 +15,7 @@ func RunPoller(ctx context.Context, interval time.Duration, onChange func(Event)
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			onChange(Event{Kind: EventPoll})
+			onChange(Event{Kind: Poll})
 		}
 	}
 }

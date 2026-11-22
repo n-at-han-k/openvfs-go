@@ -11,16 +11,53 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
+// EventKind mirrors fsnotify's portable operations (fsnotify.Op):
+// Create, Write, Remove, Rename, Chmod. Values match the bit order of
+// fsnotify.Op so an Event can carry the same meaning as a watcher event.
 type EventKind uint8
 
 const (
-	EventCreated EventKind = iota
-	EventModified
-	EventDeleted
-	EventRenamed
-	EventRescan // events were lost
-	EventPoll   // periodic tick from the poller
+	Create EventKind = 1 << iota
+	Write
+	Remove
+	Rename
+	Chmod
+	Poll // synthetic: periodic tick from the poller, no fsnotify equivalent
 )
+
+func (k EventKind) String() string {
+	switch k {
+	case Create:
+		return "Create"
+	case Write:
+		return "Write"
+	case Remove:
+		return "Remove"
+	case Rename:
+		return "Rename"
+	case Chmod:
+		return "Chmod"
+	case Poll:
+		return "Poll"
+	}
+	return "Unknown"
+}
+
+func fromFsnotify(op fsnotify.Op) EventKind {
+	switch {
+	case op.Has(fsnotify.Create):
+		return Create
+	case op.Has(fsnotify.Write):
+		return Write
+	case op.Has(fsnotify.Remove):
+		return Remove
+	case op.Has(fsnotify.Rename):
+		return Rename
+	case op.Has(fsnotify.Chmod):
+		return Chmod
+	}
+	return 0
+}
 
 type Event struct {
 	Kind EventKind
@@ -76,9 +113,10 @@ func (r *Watcher) run(ctx context.Context) {
 			if !ok {
 				return
 			}
-			// Overflow or exhausted watches: events were lost.
+			// Overflow or exhausted watches: events were lost. Ask for a
+			// full rescan by emitting a Poll event.
 			log.Printf("fsnotify: %v", err)
-			r.onChange(Event{Kind: EventRescan})
+			r.onChange(Event{Kind: Poll})
 		}
 	}
 }
@@ -92,23 +130,20 @@ func (r *Watcher) onEvent(ev fsnotify.Event) {
 	if r.ignored(rel) {
 		return
 	}
-	kind := EventModified
-	switch {
-	case ev.Op.Has(fsnotify.Create):
-		kind = EventCreated
-	case ev.Op.Has(fsnotify.Remove):
-		kind = EventDeleted
-	case ev.Op.Has(fsnotify.Rename):
-		kind = EventRenamed
-	}
-	r.onChange(Event{Kind: kind, Path: rel})
 
-	// A new or moved-in directory needs its own watch (IN_CREATE | IN_MOVED_TO).
+	// Emit one Event per operation in the bitmask.
+	for _, op := range []fsnotify.Op{fsnotify.Create, fsnotify.Write, fsnotify.Remove, fsnotify.Rename, fsnotify.Chmod} {
+		if ev.Op.Has(op) {
+			r.onChange(Event{Kind: fromFsnotify(op), Path: rel})
+		}
+	}
+
+	// A new or moved-in directory needs its own watch.
 	if ev.Op&(fsnotify.Create|fsnotify.Write) != 0 {
 		if st, err := os.Stat(ev.Name); err == nil && st.IsDir() {
 			if err := r.addTree(ev.Name); err != nil {
 				log.Printf("watch %s: %v", ev.Name, err)
-				r.onChange(Event{Kind: EventRescan})
+				r.onChange(Event{Kind: Poll})
 			}
 		}
 	}
