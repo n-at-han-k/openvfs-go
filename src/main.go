@@ -36,25 +36,20 @@ func main() {
 	scanner := directory.NewScanner(root, ignored, journal)
 
 	socketPath := filepath.Join(os.TempDir(), "openvfs.sock")
-	apiReady := make(chan error, 1)
-	go func() {
-		if err := serveAPI(ctx, socketPath, apiReady); err != nil {
-			log.Printf("socket api: %v", err)
-		}
-	}()
-	if err := <-apiReady; err != nil {
-		log.Fatalf("socket api: %v", err)
-	}
 
-	ready := make(chan error, 1)
-	go func() {
-		if err := runBackend(ctx, root, "openvfs:local", socketPath, ready); err != nil {
-			log.Printf("openvfs: %v", err)
+	go serveAPI(ctx, socketPath, func(event directory.Event) {
+		select {
+		case events <- event:
+		case <-ctx.Done():
 		}
-	}()
-	if err := <-ready; err != nil {
-		log.Fatalf("openvfs: %v", err)
-	}
+	})
+
+	go runBackend(ctx, root, "openvfs:local", socketPath, func(event directory.Event) {
+		select {
+		case events <- event:
+		case <-ctx.Done():
+		}
+	})
 
 	go directory.RunWatcher(ctx, root, ignored, func(event directory.Event) {
 		select {
