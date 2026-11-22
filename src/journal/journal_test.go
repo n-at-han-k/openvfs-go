@@ -1,4 +1,4 @@
-package directory
+package journal
 
 import (
 	"path/filepath"
@@ -8,7 +8,7 @@ import (
 func TestOpenJournalCreatesSchema(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "sync.db")
 
-	for i := 0; i < 2; i++ { // opening twice must be safe
+	for i := 0; i < 2; i++ {
 		j, err := OpenJournal(path)
 		if err != nil {
 			t.Fatalf("open #%d: %v", i+1, err)

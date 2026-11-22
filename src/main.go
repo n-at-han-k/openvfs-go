@@ -11,6 +11,7 @@ import (
 
 	"example.com/project/packages/openvfs"
 	"example.com/project/src/directory"
+	"example.com/project/src/journal"
 )
 
 func main() {
@@ -28,13 +29,19 @@ func main() {
 
 	events := make(chan directory.Event, 256)
 
-	journal, err := directory.OpenJournal(filepath.Join(root, dbPath))
+	journal, err := journal.OpenJournal(filepath.Join(root, dbPath))
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer journal.Close()
 
-	scanner := directory.NewScanner(root, ignored, journal)
+	syncer := directory.NewSyncer(root, ignored, func(event directory.Event) {
+		select {
+		case events <- event:
+		case <-ctx.Done():
+		}
+	})
+	go syncer.Run(ctx)
 
 	socketPath := filepath.Join(os.TempDir(), "openvfs.sock")
 
@@ -72,32 +79,17 @@ func main() {
 			return
 		case event := <-events:
 			if event.Kind == directory.Poll {
-				found, err := scanner.Scan()
-				if err != nil {
-					log.Printf("scan failed: %v", err)
-					continue
-				}
-				for _, change := range found {
-					select {
-					case events <- change:
-					case <-ctx.Done():
-						return
-					}
-				}
+				syncer.Request(directory.SyncRequest{Cause: event})
 				continue
 			}
 
 			switch event.Kind {
 			case directory.Create:
-				// TODO: handle create
 			case directory.Write:
-				// TODO: handle write
 			case directory.Remove:
-				// TODO: handle removal
 			case directory.Rename:
-				// TODO: handle rename
 			case directory.Chmod:
-				// TODO: handle attribute change
+			case directory.LocalEntry:
 			}
 		}
 	}

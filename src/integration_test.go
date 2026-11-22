@@ -8,24 +8,15 @@ import (
 	"time"
 
 	"example.com/project/src/directory"
+	"example.com/project/src/journal"
 )
 
-func expectEvent(t *testing.T, ch chan directory.Event, scanner *directory.Scanner, kind directory.EventKind, path string) {
+func expectEvent(t *testing.T, ch chan directory.Event, kind directory.EventKind, path string) {
 	t.Helper()
 	deadline := time.After(3 * time.Second)
 	for {
 		select {
 		case ev := <-ch:
-			if ev.Kind == directory.Poll {
-				found, err := scanner.Scan()
-				if err != nil {
-					t.Fatal(err)
-				}
-				for _, change := range found {
-					ch <- change
-				}
-				continue
-			}
 			if ev.Kind == kind && ev.Path == path {
 				return
 			}
@@ -44,12 +35,11 @@ func TestIntegrationWatchToChanges(t *testing.T) {
 	defer cancel()
 
 	events := make(chan directory.Event, 256)
-	journal, err := directory.OpenJournal(filepath.Join(root, dbPath))
+	journal, err := journal.OpenJournal(filepath.Join(root, dbPath))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer journal.Close()
-	scanner := directory.NewScanner(root, ignored, journal)
 
 	go directory.RunWatcher(ctx, root, ignored, func(ev directory.Event) {
 		select {
@@ -63,21 +53,21 @@ func TestIntegrationWatchToChanges(t *testing.T) {
 		case <-ctx.Done():
 		}
 	})
-	time.Sleep(100 * time.Millisecond) // let the watches register
+	time.Sleep(100 * time.Millisecond)
 
 	file := filepath.Join(root, "a.txt")
 	if err := os.WriteFile(file, []byte("hi"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	expectEvent(t, events, scanner, directory.Create, "a.txt")
+	expectEvent(t, events, directory.Create, "a.txt")
 
 	if err := os.WriteFile(file, []byte("much longer content now"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	expectEvent(t, events, scanner, directory.Write, "a.txt")
+	expectEvent(t, events, directory.Write, "a.txt")
 
 	if err := os.Remove(file); err != nil {
 		t.Fatal(err)
 	}
-	expectEvent(t, events, scanner, directory.Remove, "a.txt")
+	expectEvent(t, events, directory.Remove, "a.txt")
 }

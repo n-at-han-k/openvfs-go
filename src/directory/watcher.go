@@ -11,9 +11,6 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
-// EventKind mirrors fsnotify's portable operations (fsnotify.Op):
-// Create, Write, Remove, Rename, Chmod. Values match the bit order of
-// fsnotify.Op so an Event can carry the same meaning as a watcher event.
 type EventKind uint8
 
 const (
@@ -22,7 +19,8 @@ const (
 	Remove
 	Rename
 	Chmod
-	Poll // synthetic: periodic tick from the poller, no fsnotify equivalent
+	Poll
+	LocalEntry
 )
 
 func (k EventKind) String() string {
@@ -39,6 +37,8 @@ func (k EventKind) String() string {
 		return "Chmod"
 	case Poll:
 		return "Poll"
+	case LocalEntry:
+		return "LocalEntry"
 	}
 	return "Unknown"
 }
@@ -62,21 +62,18 @@ func fromFsnotify(op fsnotify.Op) EventKind {
 type Event struct {
 	Kind EventKind
 	Path string
+
+	Local LocalInfo
 }
 
-// Watcher watches root recursively and calls onChange for every event. It has
-// no debounce and no buffered change set: the callback owner decides what to
-// do with each notification.
 type Watcher struct {
 	root      string
 	w         *fsnotify.Watcher
 	ignoredFn func(string) bool
 	onChange  func(Event)
-	watched   map[string]struct{} // owned by the run goroutine
+	watched   map[string]struct{}
 }
 
-// RunWatcher sets up recursive watches on root and processes events until ctx
-// is cancelled. The caller starts it as a goroutine.
 func RunWatcher(ctx context.Context, root string, ignored func(string) bool, onChange func(Event)) {
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -113,8 +110,6 @@ func (r *Watcher) run(ctx context.Context) {
 			if !ok {
 				return
 			}
-			// Overflow or exhausted watches: events were lost. Ask for a
-			// full rescan by emitting a Poll event.
 			log.Printf("fsnotify: %v", err)
 			r.onChange(Event{Kind: Poll})
 		}
@@ -131,14 +126,12 @@ func (r *Watcher) onEvent(ev fsnotify.Event) {
 		return
 	}
 
-	// Emit one Event per operation in the bitmask.
 	for _, op := range []fsnotify.Op{fsnotify.Create, fsnotify.Write, fsnotify.Remove, fsnotify.Rename, fsnotify.Chmod} {
 		if ev.Op.Has(op) {
 			r.onChange(Event{Kind: fromFsnotify(op), Path: rel})
 		}
 	}
 
-	// A new or moved-in directory needs its own watch.
 	if ev.Op&(fsnotify.Create|fsnotify.Write) != 0 {
 		if st, err := os.Stat(ev.Name); err == nil && st.IsDir() {
 			if err := r.addTree(ev.Name); err != nil {
@@ -147,13 +140,11 @@ func (r *Watcher) onEvent(ev fsnotify.Event) {
 			}
 		}
 	}
-	// Deleted or moved-away directory: drop its watch and all descendants.
 	if ev.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
 		r.removeTree(ev.Name)
 	}
 }
 
-// addTree registers a watch for dir and every non-ignored directory below it.
 func (r *Watcher) addTree(dir string) error {
 	return filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -195,7 +186,7 @@ func (r *Watcher) removeTree(root string) {
 
 func (r *Watcher) ignored(p string) bool {
 	if strings.HasPrefix(filepath.Base(p), ".sync_") {
-		return true // journal/temp files
+		return true
 	}
 	if r.ignoredFn != nil {
 		return r.ignoredFn(p)

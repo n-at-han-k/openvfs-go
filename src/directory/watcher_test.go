@@ -104,7 +104,7 @@ func TestWatcherPublishesHints(t *testing.T) {
 	root := t.TempDir()
 	events := make(chan Event, 64)
 	go RunWatcher(ctx, root, nil, func(ev Event) { events <- ev })
-	time.Sleep(100 * time.Millisecond) // let the watches register
+	time.Sleep(100 * time.Millisecond)
 
 	file := filepath.Join(root, "a.txt")
 	if err := os.WriteFile(file, []byte("hi"), 0o644); err != nil {
