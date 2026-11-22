@@ -78,7 +78,7 @@ func RunStat(argv []string) int {
 			fmt.Printf("OpenVfs Stat: '%s' (%s)\n", path, registration.Error)
 		}
 		fmt.Printf("%-60s %-4s %-10s %-10s %-10s %-10s %-33s %s\n",
-			"Path", "Valid", "Size", "ActualSize", "openvfs.State", "openvfs.PinState", "Etag", "FileId")
+			"Path", "Valid", "Size", "ActualSize", "State", "PinState", "Etag", "FileId")
 		if info.IsDir() {
 			entries, err := os.ReadDir(path)
 			if err != nil {

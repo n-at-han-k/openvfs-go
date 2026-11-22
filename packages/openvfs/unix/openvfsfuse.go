@@ -83,7 +83,7 @@ func (c *VFSFuseContext) getInternalPath(path string) string {
 func (c *VFSFuseContext) getExternalPath(path string) string {
 	// ./foo
 	if !filepath.IsAbs(path) {
-		// openvfs.Join cleans the result, where upstream's operator/ leaves the "/./"
+		// Join cleans the result, where upstream's operator/ leaves the "/./"
 		// in place; both name the same file.
 		return filepath.Join(c.mountPoint, path)
 	}
@@ -297,7 +297,7 @@ func InitializeOpenVFSFuse(ctx context.Context, openVFSArgs openvfs.Args, ready 
 		// upstream asserts
 		return report(fmt.Errorf("no socket path given"))
 	}
-	contextInstance.socketThread = openvfs.NewSocketThread("openvfs.SocketThread", contextInstance.jobs)
+	contextInstance.socketThread = openvfs.NewSocketThread("SocketThread", contextInstance.jobs)
 	if !contextInstance.socketThread.CreateThread(openVFSArgs.SocketPath) {
 		fmt.Fprintln(os.Stderr, "Unable to create the socket thread")
 		return report(fmt.Errorf("unable to create the socket thread"))
