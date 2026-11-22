@@ -9,8 +9,6 @@ import (
 	"strconv"
 
 	"github.com/vmihailenco/msgpack/v5"
-
-	"example.com/project/packages/openvfs"
 )
 
 // toMsgpack is nlohmann::json::to_msgpack(), byte for byte. nlohmann backs a
@@ -27,9 +25,9 @@ func toMsgpack(v any) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// Transpiled from src/openvfs/openvfs.{h,cpp}.
+// Transpiled from src/openvfs/{h,cpp}.
 
-// Registration is the blob stored in user.openvfs.registration.
+// Registration is the blob stored in user.registration.
 type Registration struct {
 	Path    string
 	Owner   string
@@ -38,15 +36,15 @@ type Registration struct {
 }
 
 func newRegistration(absolutePath, owner string) Registration {
-	return Registration{Path: absolutePath, Owner: owner, Version: openvfs.Version}
+	return Registration{Path: absolutePath, Owner: owner, Version: Version}
 }
 
 func (r Registration) IsOK() bool { return r.Error == "" }
 
 func (r Registration) ToData() ([]byte, error) {
 	return toMsgpack(map[string]any{
-		openvfs.RegistrationOwner.String():   r.Owner,
-		openvfs.RegistrationVersion.String(): r.Version,
+		RegistrationOwner.String():   r.Owner,
+		RegistrationVersion.String(): r.Version,
 	})
 }
 
@@ -72,7 +70,7 @@ func RegistrationFromData(absolutePath string, d []byte) Registration {
 }
 
 func RegistrationFromAttributes(absolutePath string) Registration {
-	data, ok := xattrGetString(absolutePath, openvfs.XAttrRegistration)
+	data, ok := xattrGetString(absolutePath, XAttrRegistration)
 	if !ok {
 		out := newRegistration(absolutePath, "")
 		out.Error = "No registration info found"
@@ -92,7 +90,7 @@ func RegisterFilesystem(path, owner string) Registration {
 		info.Error = "Failed to register OpenVFS"
 		return info
 	}
-	if xattrSet(path, openvfs.XAttrRegistration, registration, 0) != nil {
+	if xattrSet(path, XAttrRegistration, registration, 0) != nil {
 		info.Error = "Failed to register OpenVFS"
 		return info
 	}
@@ -100,7 +98,7 @@ func RegisterFilesystem(path, owner string) Registration {
 }
 
 func UnregisterFilesystem(info Registration) bool {
-	if xattrRemove(info.Path, openvfs.XAttrRegistration) != nil {
+	if xattrRemove(info.Path, XAttrRegistration) != nil {
 		fmt.Fprintln(os.Stderr, "Failed to unregister OpenVFS")
 		return false
 	}
@@ -108,14 +106,14 @@ func UnregisterFilesystem(info Registration) bool {
 	return true
 }
 
-// PlaceHolderAttributes is the blob stored in user.openvfs.data.
+// PlaceHolderAttributes is the blob stored in user.data.
 type PlaceHolderAttributes struct {
 	AbsolutePath string
 	Etag         string
 	FileID       string
 	Size         uint64
-	State        openvfs.State
-	PinState     openvfs.PinState
+	State        State
+	PinState     PinState
 
 	ok bool
 }
@@ -126,8 +124,8 @@ func NewPlaceHolderAttributes(absolutePath string) PlaceHolderAttributes {
 	// Upstream's default member initialisers: an existing file is assumed.
 	return PlaceHolderAttributes{
 		AbsolutePath: absolutePath,
-		State:        openvfs.StateHydrated,
-		PinState:     openvfs.PinInherited,
+		State:        StateHydrated,
+		PinState:     PinInherited,
 	}
 }
 
@@ -140,8 +138,8 @@ func CreatePlaceHolder(absolutePath, etag, fileID string, size uint64) PlaceHold
 		Etag:         etag,
 		FileID:       fileID,
 		Size:         size,
-		State:        openvfs.StateDehydrated,
-		PinState:     openvfs.PinInherited,
+		State:        StateDehydrated,
+		PinState:     PinInherited,
 		ok:           true,
 	}
 }
@@ -149,11 +147,11 @@ func CreatePlaceHolder(absolutePath, etag, fileID string, size uint64) PlaceHold
 func (a PlaceHolderAttributes) ToData() ([]byte, error) {
 	// Upstream asserts isOk() here.
 	return toMsgpack(map[string]any{
-		openvfs.AttrEtag.String():     a.Etag,
-		openvfs.AttrFileID.String():   a.FileID,
-		openvfs.AttrSize.String():     a.Size,
-		openvfs.AttrState.String():    uint8(a.State),
-		openvfs.AttrPinState.String(): uint8(a.PinState),
+		AttrEtag.String():     a.Etag,
+		AttrFileID.String():   a.FileID,
+		AttrSize.String():     a.Size,
+		AttrState.String():    uint8(a.State),
+		AttrPinState.String(): uint8(a.PinState),
 	})
 }
 
@@ -177,8 +175,8 @@ func PlaceHolderFromData(absolutePath string, d []byte) PlaceHolderAttributes {
 		Etag:         j.Etag,
 		FileID:       j.FileID,
 		Size:         j.Size,
-		State:        openvfs.State(j.State),
-		PinState:     openvfs.PinState(j.PinState),
+		State:        State(j.State),
+		PinState:     PinState(j.PinState),
 		ok:           true,
 	}
 }
@@ -186,7 +184,7 @@ func PlaceHolderFromData(absolutePath string, d []byte) PlaceHolderAttributes {
 // PlaceHolderFromAttributes is the std::optional-returning overload: ok is
 // false when the attribute is absent.
 func PlaceHolderFromAttributes(absolutePath string) (PlaceHolderAttributes, bool) {
-	data, ok := xattrGetString(absolutePath, openvfs.XAttrData)
+	data, ok := xattrGetString(absolutePath, XAttrData)
 	if !ok {
 		return PlaceHolderAttributes{}, false
 	}
@@ -195,7 +193,7 @@ func PlaceHolderFromAttributes(absolutePath string) (PlaceHolderAttributes, bool
 
 // RealSize is PlaceHolderAttributes::realSize().
 func (a PlaceHolderAttributes) RealSize() uint64 {
-	size, ok := xattrGetString(a.AbsolutePath, openvfs.XAttrRealSize)
+	size, ok := xattrGetString(a.AbsolutePath, XAttrRealSize)
 	if !ok {
 		// the fuse layer is not available, so we can use the actual file size
 		st, err := os.Stat(a.AbsolutePath)
@@ -216,11 +214,11 @@ func (a PlaceHolderAttributes) Validate() bool {
 		return false
 	}
 	switch a.State {
-	case openvfs.StateHydrated:
+	case StateHydrated:
 		return a.Size == 0
-	case openvfs.StateDehydrated:
+	case StateDehydrated:
 		return a.RealSize() == 0
-	case openvfs.StateHydrating:
+	case StateHydrating:
 		return true
 	}
 	return true
@@ -230,7 +228,7 @@ func (a PlaceHolderAttributes) Validate() bool {
 // out for a file that carries no data attribute of its own.
 func DefaultData() []byte {
 	attributes := CreatePlaceHolder("", "", "", 0)
-	attributes.State = openvfs.StateHydrated
+	attributes.State = StateHydrated
 	data, _ := attributes.ToData()
 	return data
 }
@@ -243,5 +241,5 @@ func SetPlaceHolderAttributes(path string, attr PlaceHolderAttributes) error {
 	if err != nil {
 		return err
 	}
-	return xattrSet(path, openvfs.XAttrData, data, 0)
+	return xattrSet(path, XAttrData, data, 0)
 }

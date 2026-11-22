@@ -1,4 +1,4 @@
-package openvfs
+package unix
 
 import (
 	"bufio"

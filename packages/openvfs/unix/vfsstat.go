@@ -3,8 +3,6 @@
 package unix
 
 import (
-	"example.com/project/packages/openvfs"
-
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,7 +11,7 @@ import (
 // Transpiled from src/vfsstat/main.cpp.
 
 func getPlaceholderAttribs(path string) PlaceHolderAttributes {
-	data, ok := xattrGetString(path, openvfs.XAttrData)
+	data, ok := xattrGetString(path, XAttrData)
 	if !ok {
 		return PlaceHolderFromData(path, nil)
 	}

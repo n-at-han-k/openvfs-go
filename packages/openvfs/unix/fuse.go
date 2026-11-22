@@ -3,8 +3,6 @@
 package unix
 
 import (
-	"example.com/project/packages/openvfs"
-
 	"context"
 	"os"
 	"strconv"
@@ -42,7 +40,7 @@ func callerOf(ctx context.Context) *callerInfo {
 // mount, resolved against the pre-mount root descriptor. absolutePath is kept
 // for the external name upstream carries in PlaceHolderAttributes.
 func placeHolderFromAttributesAt(dirfd int, rel, absolutePath string) (PlaceHolderAttributes, bool) {
-	data, ok := xattrGetAtString(dirfd, rel, openvfs.XAttrData)
+	data, ok := xattrGetAtString(dirfd, rel, XAttrData)
 	if !ok {
 		return PlaceHolderAttributes{}, false
 	}
@@ -344,8 +342,8 @@ func (n *node) Setattr(ctx context.Context, f fs.FileHandle, in *gofuse.SetAttrI
 			g = int(gid)
 		}
 		err := unix.Fchownat(n.v.rootHandle, rel, u, g, unix.AT_SYMLINK_NOFOLLOW)
-		username, userOK := openvfs.Username(uint32(u))
-		groupname, groupOK := openvfs.Groupname(uint32(g))
+		username, userOK := getusername(uint32(u))
+		groupname, groupOK := getgroupname(uint32(g))
 		if userOK && groupOK {
 			openvfsfuseLog(caller, path, "chown", rc(err), "chown to %d:%d %s:%s", u, g, username, groupname)
 		} else {
@@ -454,7 +452,7 @@ func (n *node) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, s
 		openvfsfuseLog(caller, path, "open", 0, "Desktop client tries to access, bypassing!")
 	} else {
 		attribs, haveAttribs := placeHolderFromAttributesAt(n.v.rootHandle, rel, n.external())
-		if haveAttribs && attribs.State == openvfs.StateDehydrated {
+		if haveAttribs && attribs.State == StateDehydrated {
 			// the file is virtual. It will be hydrated if the calling instance
 			// is not on the ignore list
 			if errno := n.v.requestHydration(caller, path, attribs); errno != 0 {
@@ -545,7 +543,7 @@ func (n *node) Getxattr(ctx context.Context, attr string, dest []byte) (uint32, 
 
 	path := n.internal()
 	rel := n.relPath()
-	if attr == openvfs.XAttrRealSize {
+	if attr == XAttrRealSize {
 		st, err := n.lstat(rel)
 		if err != nil {
 			return 0, asErrno(err)
@@ -553,7 +551,7 @@ func (n *node) Getxattr(ctx context.Context, attr string, dest []byte) (uint32, 
 		return copyDataResult([]byte(strconv.FormatInt(st.Size, 10)))
 	}
 	ret, err := xattrGetAt(n.v.rootHandle, rel, attr, dest)
-	if isErrNoAttr(err) && attr == openvfs.XAttrData {
+	if isErrNoAttr(err) && attr == XAttrData {
 		// return the default value for the attributes
 		openvfsfuseLog(callerOf(ctx), path, "getxattr", 0, "Returning default data for %s", attr)
 		return copyDataResult(DefaultData())
@@ -577,7 +575,7 @@ func (n *node) Removexattr(ctx context.Context, attr string) syscall.Errno {
 }
 
 // mountAndServe is the fuse_main() call at the end of initializeOpenVFSFuse().
-func mountAndServe(ctx context.Context, c *VFSFuseContext, args openvfs.Args, report func(error) error) error {
+func mountAndServe(ctx context.Context, c *VFSFuseContext, args Args, report func(error) error) error {
 	// use the system inodes instead of the libfuse generated, and do not let
 	// the kernel cache anything: openVFSfuse_init()'s fuse_config.
 	zero := time.Duration(0)

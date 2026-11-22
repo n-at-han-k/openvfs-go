@@ -3,8 +3,6 @@
 package unix
 
 import (
-	"example.com/project/packages/openvfs"
-
 	"context"
 	"fmt"
 	"os"
@@ -32,8 +30,8 @@ type VFSFuseContext struct {
 	hydrationTimeout      time.Duration
 	debugEnabled          bool
 
-	jobs         *openvfs.SharedMap
-	socketThread *openvfs.SocketThread
+	jobs         *SharedMap
+	socketThread *SocketThread
 	// FUSE dispatches requests from several threads, so the transfer id needs
 	// to be atomic.
 	transferID atomic.Int32
@@ -41,7 +39,7 @@ type VFSFuseContext struct {
 
 var instance atomic.Pointer[VFSFuseContext]
 
-func NewVFSFuseContext(args openvfs.Args) (*VFSFuseContext, error) {
+func NewVFSFuseContext(args Args) (*VFSFuseContext, error) {
 	// The root handle is opened before mounting, so a path resolved against it
 	// reaches the directory below the mount rather than the mount.
 	handle, err := openRootHandle(args.MountPoint)
@@ -56,7 +54,7 @@ func NewVFSFuseContext(args openvfs.Args) (*VFSFuseContext, error) {
 		appsNoHydrateEndsWith: args.AppsNoHydrateEndsWith,
 		hydrationTimeout:      args.HydrationTimeout,
 		debugEnabled:          args.DebugEnabled,
-		jobs:                  openvfs.NewSharedMap(),
+		jobs:                  NewSharedMap(),
 	}
 	c.transferID.Store(12)
 	instance.Store(c)
@@ -83,7 +81,7 @@ func (c *VFSFuseContext) getInternalPath(path string) string {
 func (c *VFSFuseContext) getExternalPath(path string) string {
 	// ./foo
 	if !filepath.IsAbs(path) {
-		// Join cleans the result, where upstream's operator/ leaves the "/./"
+		// strJoin cleans the result, where upstream's operator/ leaves the "/./"
 		// in place; both name the same file.
 		return filepath.Join(c.mountPoint, path)
 	}
@@ -205,7 +203,7 @@ func (c *VFSFuseContext) requestHydration(caller *callerInfo, path string, attri
 	}
 
 	// Create message to send to worker thread 1
-	msgData := &openvfs.MsgData{
+	msgData := &MsgData{
 		Msg:       "V2/HYDRATE_FILE",
 		File:      c.getExternalPath(attribs.AbsolutePath),
 		FileID:    attribs.FileID,
@@ -220,7 +218,7 @@ func (c *VFSFuseContext) requestHydration(caller *callerInfo, path string, attri
 	// queues, so the socket thread may well have sent the request and received
 	// the answer before this thread runs again. A waiter must never be able to
 	// observe the absence of a job it just posted.
-	c.jobs.Insert(msgData.ID, openvfs.HydJob{State: openvfs.HydRunning})
+	c.jobs.Insert(msgData.ID, HydJob{State: HydRunning})
 
 	// push hydration request to the thread that handles the communication to the client
 	if !c.socketThread.PostMsg(msgData) {
@@ -237,16 +235,16 @@ func (c *VFSFuseContext) requestHydration(caller *callerInfo, path string, attri
 	c.jobs.Remove(msgData.ID)
 
 	switch result {
-	case openvfs.HydResultSucceeded:
+	case HydResultSucceeded:
 		openvfsfuseLog(caller, path, "open", 0, "Successfully finished job %d", msgData.ID)
 		return 0
-	case openvfs.HydResultFailed:
+	case HydResultFailed:
 		openvfsfuseLog(caller, path, "open", 0, "Failed job %d", msgData.ID)
 		return errIO
-	case openvfs.HydResultTimedOut:
+	case HydResultTimedOut:
 		openvfsfuseLog(caller, path, "open", 0, "TIMEOUT - no answer from client for job %d", msgData.ID)
 		return errTimedOut
-	case openvfs.HydResultLost:
+	case HydResultLost:
 		openvfsfuseLog(caller, path, "open", 0, "Job queue does not have job %d", msgData.ID)
 		return errIO
 	}
@@ -257,7 +255,7 @@ func (c *VFSFuseContext) requestHydration(caller *callerInfo, path string, attri
 // the mount is torn down, so ctx stands in for the signal that unmounts it and
 // ready reports the outcome of the setup to a caller that mounted in a
 // goroutine. Both are nil in the standalone path.
-func InitializeOpenVFSFuse(ctx context.Context, openVFSArgs openvfs.Args, ready chan<- error) error {
+func InitializeOpenVFSFuse(ctx context.Context, openVFSArgs Args, ready chan<- error) error {
 	report := func(err error) error {
 		if ready != nil {
 			select {
@@ -297,7 +295,7 @@ func InitializeOpenVFSFuse(ctx context.Context, openVFSArgs openvfs.Args, ready 
 		// upstream asserts
 		return report(fmt.Errorf("no socket path given"))
 	}
-	contextInstance.socketThread = openvfs.NewSocketThread("SocketThread", contextInstance.jobs)
+	contextInstance.socketThread = NewSocketThread("SocketThread", contextInstance.jobs)
 	if !contextInstance.socketThread.CreateThread(openVFSArgs.SocketPath) {
 		fmt.Fprintln(os.Stderr, "Unable to create the socket thread")
 		return report(fmt.Errorf("unable to create the socket thread"))
@@ -324,7 +322,7 @@ func InitializeOpenVFSFuse(ctx context.Context, openVFSArgs openvfs.Args, ready 
 
 // Main is main() of src/openvfsfuse/main.cpp.
 func Main(argv []string) int {
-	if openvfsfuseArgs, ok := openvfs.ProcessArgs(argv, os.Stdout, os.Stderr); ok {
+	if openvfsfuseArgs, ok := ProcessArgs(argv, os.Stdout, os.Stderr); ok {
 		fmt.Printf("openVFSfuse starting at%s.\n", openvfsfuseArgs.MountPoint)
 		if err := InitializeOpenVFSFuse(context.Background(), openvfsfuseArgs, nil); err != nil {
 			return -1
@@ -337,14 +335,14 @@ func Main(argv []string) int {
 // Run has no upstream counterpart: it registers the root and mounts it in one
 // call, which is what the Go daemon in src/main.go needs.
 func Run(ctx context.Context, root, owner, socketPath string, ready chan<- error) error {
-	args, ok := openvfs.ProcessArgs([]string{"openvfs", "-o", owner, "-s", socketPath, root}, os.Stdout, os.Stderr)
+	args, ok := ProcessArgs([]string{"openvfs", "-o", owner, "-s", socketPath, root}, os.Stdout, os.Stderr)
 	if !ok {
 		return os.ErrInvalid
 	}
 	if info := RegisterFilesystem(args.MountPoint, owner); !info.IsOK() {
 		return fmt.Errorf("%s", info.Error)
 	}
-	if cfg, err := openvfs.ParseConfig(openvfs.DefaultConfig); err == nil {
+	if cfg, err := parseConfig(defaultConfig); err == nil {
 		args.AppsNoHydrateFull = cfg.IgnoreApps.ByName
 		args.AppsNoHydrateEndsWith = cfg.IgnoreApps.EndsWith
 		if cfg.HydrationTimeoutSeconds > 0 {

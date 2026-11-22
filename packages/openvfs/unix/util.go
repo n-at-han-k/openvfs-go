@@ -1,4 +1,4 @@
-package openvfs
+package unix
 
 import (
 	"os/user"
@@ -8,9 +8,9 @@ import (
 // Helpers with no single upstream counterpart: the small pieces of C that the
 // callbacks use inline.
 
-// Username is Username(): the passwd entry's name, or not ok where
+// getusername is getusername(): the passwd entry's name, or not ok where
 // upstream returns nullptr.
-func Username(uid uint32) (string, bool) {
+func getusername(uid uint32) (string, bool) {
 	p, err := user.LookupId(strconv.FormatUint(uint64(uid), 10))
 	if err != nil {
 		return "", false
@@ -18,8 +18,8 @@ func Username(uid uint32) (string, bool) {
 	return p.Username, true
 }
 
-// Groupname is Groupname().
-func Groupname(gid uint32) (string, bool) {
+// getgroupname is getgroupname().
+func getgroupname(gid uint32) (string, bool) {
 	g, err := user.LookupGroupId(strconv.FormatUint(uint64(gid), 10))
 	if err != nil {
 		return "", false

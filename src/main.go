@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"example.com/project/packages/openvfs"
 	"example.com/project/src/directory"
 )
 
@@ -37,14 +38,14 @@ func main() {
 
 	socketPath := filepath.Join(os.TempDir(), "openvfs.sock")
 
-	go serveAPI(ctx, socketPath, func(event directory.Event) {
+	go openvfs.ServeAPI(ctx, socketPath, func(event directory.Event) {
 		select {
 		case events <- event:
 		case <-ctx.Done():
 		}
 	})
 
-	go runBackend(ctx, root, "openvfs:local", socketPath, func(event directory.Event) {
+	go openvfs.Run(ctx, root, "openvfs:local", socketPath, func(event directory.Event) {
 		select {
 		case events <- event:
 		case <-ctx.Done():

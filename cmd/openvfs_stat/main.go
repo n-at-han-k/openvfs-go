@@ -3,6 +3,8 @@ package main
 import (
 	"os"
 
+	"example.com/project/packages/openvfs"
+
 	"github.com/spf13/cobra"
 )
 
@@ -16,7 +18,7 @@ func main() {
 		SilenceErrors:      true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			argv := append([]string{os.Args[0]}, args...)
-			if code := runStat(argv); code != 0 {
+			if code := openvfs.RunStat(argv); code != 0 {
 				os.Exit(code)
 			}
 			return nil

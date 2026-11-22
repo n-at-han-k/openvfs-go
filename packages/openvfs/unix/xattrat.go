@@ -7,7 +7,7 @@ import "golang.org/x/sys/unix"
 // There is no portable l*xattrat(), so the file is opened relative to the root
 // descriptor without following a final symlink and the f*xattr() calls are used
 // on it. Neither Linux nor macOS lets a user namespace attribute live on a
-// symlink, so nothing that can carry user.openvfs.* is lost.
+// symlink, so nothing that can carry user.* is lost.
 
 func openAt(dirfd int, rel string) (int, error) {
 	fd, err := unix.Openat(dirfd, rel, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)

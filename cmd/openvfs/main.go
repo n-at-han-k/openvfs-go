@@ -6,6 +6,8 @@ import (
 	"os/signal"
 	"syscall"
 
+	"example.com/project/packages/openvfs"
+
 	"github.com/spf13/cobra"
 )
 
@@ -20,20 +22,12 @@ func main() {
 		SilenceErrors:      true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			argv := append([]string{os.Args[0]}, args...)
-			options, ok := processArgs(argv, cmd.OutOrStdout(), cmd.ErrOrStderr())
-			if !ok {
-				os.Exit(-1) // upstream main returns -1
-			}
 
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer cancel()
 
-			ready := make(chan error, 1)
-			if err := initialize(ctx, options, ready); err != nil {
-				if e := <-ready; e != nil {
-					cmd.PrintErrln(e)
-				}
-				os.Exit(-1)
+			if code := openvfs.Main(ctx, argv); code != 0 {
+				os.Exit(code)
 			}
 			return nil
 		},

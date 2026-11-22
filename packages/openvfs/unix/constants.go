@@ -1,4 +1,4 @@
-package openvfs
+package unix
 
 // Transpiled from src/openvfs/openvfconstants.h.
 //
@@ -12,11 +12,11 @@ const Version = 0
 // XAttributeNames
 const (
 	// XAttrData is the XAttribute name for OpenVfs objects.
-	XAttrData = "user.openvfs.data"
+	XAttrData = "user.data"
 	// XAttrRealSize is the Xattribute provided by OpenVFSFuse to determine
 	// the size on the filesystem.
-	XAttrRealSize     = "user.openvfs.realsize"
-	XAttrRegistration = "user.openvfs.registration"
+	XAttrRealSize     = "user.realsize"
+	XAttrRegistration = "user.registration"
 )
 
 type RegistrationAttributes uint8

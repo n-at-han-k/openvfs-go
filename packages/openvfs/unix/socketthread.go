@@ -1,4 +1,4 @@
-package openvfs
+package unix
 
 import (
 	"bytes"
@@ -396,7 +396,7 @@ func (s *SocketThread) handleReceivedMsg(msg string) {
 			}
 		}
 	case "VERSION":
-		attribs := Split(msgAttr, ':')
+		attribs := strSplit(msgAttr, ':')
 		if len(attribs) == 3 {
 			fmt.Println("Got PID of the Desktop Client: " + attribs[2])
 			pid, err := strconv.ParseInt(attribs[2], 10, 64)

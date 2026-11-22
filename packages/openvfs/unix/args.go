@@ -1,4 +1,4 @@
-package openvfs
+package unix
 
 import (
 	_ "embed"
@@ -15,9 +15,9 @@ import (
 // src/openvfsfuse/main.cpp.
 
 //go:embed config.json
-var DefaultConfig []byte
+var defaultConfig []byte
 
-const MaxFuseArgs = 32
+const maxFuseArgs = 32
 
 // Config field names, matching main.cpp's ConfigXxxStr constants. Go struct
 // tags have to be literals, so they are repeated in Config below.
@@ -38,7 +38,7 @@ type Config struct {
 	HydrationTimeoutSeconds int `json:"hydrationTimeoutSeconds"`
 }
 
-func ParseConfig(b []byte) (Config, error) {
+func parseConfig(b []byte) (Config, error) {
 	var cfg Config
 	err := json.Unmarshal(b, &cfg)
 	return cfg, err
@@ -122,7 +122,7 @@ func ProcessArgs(argv []string, stdout, stderr io.Writer) (Args, bool) {
 				fmt.Fprintln(stderr, "Failed to open config file "+opt.arg)
 				return out, false
 			}
-			data, err := ParseConfig(b)
+			data, err := parseConfig(b)
 			if err != nil {
 				fmt.Fprintf(stderr, "Failed to parse config file %s: %v\n", opt.arg, err)
 				return out, false
@@ -146,7 +146,7 @@ func ProcessArgs(argv []string, stdout, stderr io.Writer) (Args, bool) {
 
 	if len(opts) > 0 {
 		out.FuseArgv = append(out.FuseArgv, "-o")
-		out.FuseArgv = append(out.FuseArgv, Join(opts, ','))
+		out.FuseArgv = append(out.FuseArgv, strJoin(opts, ','))
 	}
 
 	if len(operands) >= 1 {
@@ -170,7 +170,7 @@ func ProcessArgs(argv []string, stdout, stderr io.Writer) (Args, bool) {
 
 	// If there are still extra unparsed arguments, pass them onto FUSE..
 	for _, extra := range operands {
-		if len(out.FuseArgv) >= MaxFuseArgs {
+		if len(out.FuseArgv) >= maxFuseArgs {
 			// upstream asserts
 			break
 		}
