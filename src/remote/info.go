@@ -68,16 +68,19 @@ func Fetch(ctx context.Context, client *http.Client, url string) (RemoteInfo, er
 	if client == nil {
 		client = http.DefaultClient
 	}
+
 	req, err := http.NewRequestWithContext(ctx, "PROPFIND", url, nil)
 	if err != nil {
 		return out, err
 	}
+
 	req.Header.Set("Depth", "0")
 	resp, err := client.Do(req)
 	if err != nil {
 		return out, err
 	}
 	defer resp.Body.Close()
+
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 		return out, fmt.Errorf("PROPFIND %s: %s: %s", url, resp.Status, body)
@@ -87,6 +90,7 @@ func Fetch(ctx context.Context, client *http.Client, url string) (RemoteInfo, er
 	if err := xml.NewDecoder(resp.Body).Decode(&ms); err != nil {
 		return out, err
 	}
+
 	for _, r := range ms.Response {
 		for _, ps := range r.Propstat {
 			p := ps.Prop
@@ -95,14 +99,17 @@ func Fetch(ctx context.Context, client *http.Client, url string) (RemoteInfo, er
 			out.Permissions = p.Permissions
 			out.Checksum = p.Checksums.Checksum
 			out.IsDir = p.ResourceType.Collection != nil
+
 			if p.ContentLength != "" {
 				out.Size, _ = strconv.ParseInt(p.ContentLength, 10, 64)
 			}
+
 			if p.LastModified != "" {
 				if t, err := http.ParseTime(p.LastModified); err == nil {
 					out.ModTime = t.UnixNano()
 				}
 			}
+
 			return out, nil
 		}
 	}

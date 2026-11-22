@@ -6,7 +6,6 @@ require (
 	github.com/deploymenttheory/go-bindings-win32 v0.7.0
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/hanwen/go-fuse/v2 v2.12.1
-	github.com/spf13/cobra v1.10.2
 	github.com/vmihailenco/msgpack/v5 v5.4.1
 	golang.org/x/sys v0.50.0
 	modernc.org/sqlite v1.63.0
