@@ -1,0 +1,57 @@
+services:
+  opencloud:
+    image: opencloudeu/opencloud-rolling:9.0.0
+    user: "1000:1000"
+    entrypoint:
+      - /bin/sh
+    command:
+      - -c
+      - opencloud init || true; opencloud server
+    environment:
+      OC_URL: ${OC_URL:-https://127.0.0.1:18473}
+      OC_INSECURE: ${OC_INSECURE:-true}
+      PROXY_TLS: "true"
+      PROXY_HTTP_ADDR: 0.0.0.0:${OPENCLOUD_PORT:-18473}
+      PROXY_TRANSPORT_TLS_CERT: /certs/server.crt
+      PROXY_TRANSPORT_TLS_KEY: /certs/server.key
+      # Enable HTTP Basic authentication for clients that do not use OIDC.
+      PROXY_ENABLE_BASIC_AUTH: ${PROXY_ENABLE_BASIC_AUTH:-true}
+      IDM_ADMIN_PASSWORD: ${IDM_ADMIN_PASSWORD:-admin}
+      IDM_CREATE_DEMO_USERS: ${IDM_CREATE_DEMO_USERS:-false}
+      OC_LOG_LEVEL: ${OC_LOG_LEVEL:-info}
+      OC_DEFAULT_LANGUAGE: ${OC_DEFAULT_LANGUAGE:-en}
+      FRONTEND_CHECK_FOR_UPDATES: ${FRONTEND_CHECK_FOR_UPDATES:-false}
+      START_ADDITIONAL_SERVICES: ${START_ADDITIONAL_SERVICES:-}
+      # The built-in IDP requires an https issuer URL to bootstrap.
+      IDP_ISS: ${IDP_ISS:-https://127.0.0.1:18473}
+      # The desktop shell serves the web bundle over plaat.fm://, so its origin
+      # has to be allowed or every fetch the bundle makes back here is refused.
+      # WebKit leaves the port off a custom scheme's origin, so no port here.
+      OC_CORS_ALLOW_ORIGINS: ${OC_CORS_ALLOW_ORIGINS:-https://127.0.0.1:18473,plaat.fm://127.0.0.1}
+      OC_CORS_ALLOW_CREDENTIALS: ${OC_CORS_ALLOW_CREDENTIALS:-true}
+      OC_CORS_ALLOW_METHODS: ${OC_CORS_ALLOW_METHODS:-GET,POST,PUT,PATCH,DELETE,OPTIONS,HEAD,PROPFIND,MKCOL,MOVE,COPY,REPORT,SEARCH}
+      OC_CORS_ALLOW_HEADERS: ${OC_CORS_ALLOW_HEADERS:-Authorization,Origin,Content-Type,Accept,X-Requested-With,X-Request-Id,Depth,Destination,Overwrite,Ocs-Apirequest}
+    ports:
+      - "${OPENCLOUD_PORT:-18473}:${OPENCLOUD_PORT:-18473}"
+    volumes:
+      - opencloud-config:/etc/opencloud
+      - opencloud-data:/var/lib/opencloud
+      - ./certs:/certs:ro
+      - ./idp.yaml:/etc/opencloud/idp.yaml:ro
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "curl",
+          "-fsSk",
+          "https://127.0.0.1:${OPENCLOUD_PORT:-18473}/health",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    restart: unless-stopped
+
+volumes:
+  opencloud-config:
+  opencloud-data:

@@ -1,0 +1,42 @@
+clients:
+  # The desktop shell serves this same bundle from plaat.fm://<host>, so that
+  # origin and its redirects are listed here too. A custom scheme makes this a
+  # native client as far as the IDP is concerned, the way the iOS and Android
+  # clients below use oc://.
+  - id: web
+    name: OpenCloud Web App
+    trusted: true
+    redirect_uris:
+      - "{{OC_URL}}/"
+      - "{{OC_URL}}/oidc-callback.html"
+      - "{{OC_URL}}/oidc-silent-redirect.html"
+      - "plaat.fm://127.0.0.1/"
+      - "plaat.fm://127.0.0.1/oidc-callback.html"
+      - "plaat.fm://127.0.0.1/oidc-silent-redirect.html"
+    origins:
+      - "{{OC_URL}}"
+      - "plaat.fm://127.0.0.1"
+
+  - id: OpenCloudDesktop
+    name: OpenCloud Desktop Client
+    trusted: true
+    application_type: native
+    redirect_uris:
+      - "http://127.0.0.1"
+      - "http://localhost"
+
+  - id: OpenCloudAndroid
+    name: OpenCloud Android App
+    application_type: native
+    redirect_uris:
+      - "oc://android.opencloud.eu"
+    post_logout_redirect_uris:
+      - "oc://android.opencloud.eu"
+
+  - id: OpenCloudIOS
+    name: OpenCloud iOS App
+    application_type: native
+    redirect_uris:
+      - "oc://ios.opencloud.eu"
+    post_logout_redirect_uris:
+      - "oc://ios.opencloud.eu"
