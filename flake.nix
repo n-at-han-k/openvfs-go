@@ -30,7 +30,11 @@
             ];
 
             # Project-specific tools.
-            packages = with pkgs; [ fuse3 libxml2 ];
+            packages = with pkgs; [
+              fuse3
+              libxml2
+              bat
+            ];
 
             # Environment variables.
             GOPRIVATE = "github.com/planetscale/*";
