@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+
+"$(dirname "$0")/dav-admin" -T "$@" "https://localhost:18473/remote.php/dav/files/admin/"

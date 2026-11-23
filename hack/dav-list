@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+
+"$(dirname "$0")/dav-admin" -s \
+  -X PROPFIND \
+  -H "Depth: 1" \
+  "https://localhost:18473/remote.php/dav/files/admin/"

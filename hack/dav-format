@@ -1,0 +1,14 @@
+#!/bin/sh
+
+# Pretty-print DAV XML from stdin (or files given as arguments).
+# Colourise with bat when writing to a terminal; keep pipes/redirects plain.
+
+if [ "$#" -eq 0 ]; then
+  set -- -
+fi
+
+if [ -t 1 ] && command -v bat >/dev/null 2>&1; then
+  xmllint --format "$@" | bat -l xml --paging=never
+else
+  xmllint --format "$@"
+fi

@@ -30,14 +30,14 @@
             ];
 
             # Project-specific tools.
-            packages = with pkgs; [ fuse3 ];
+            packages = with pkgs; [ fuse3 libxml2 ];
 
             # Environment variables.
             GOPRIVATE = "github.com/planetscale/*";
 
-            # shellHook = ''
-            #   export PATH="$PWD/bin:$PATH"
-            # '';
+             shellHook = /* bash */ ''
+               export PATH="$PWD/bin:$PWD/hack:$PATH"
+             '';
           };
         };
     };
