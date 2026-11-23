@@ -84,6 +84,16 @@ VALUES (?1 , ?2, ?3 , ?4 , ?5 , ?6 , ?7,  ?8 , ?9 , ?10, ?11, ?12, ?13);`
 	getDirtyPlaceholders = selectFileRecord + `WHERE hasDirtyPlaceholder=TRUE`
 )
 
+// C++ registers parent_hash as a deterministic SQLite function, see
+// syncjournaldb.cpp:286-295:
+//
+//	const char *end = std::strrchr(text, '/');
+//	if (!end) end = text;
+//	c_jhash64(text, end - text, 0);
+//
+// A path with no slash hashes the *empty* string, not itself: a root-level
+// file's parent is the sync root. Hashing the whole path instead makes every
+// root-level row invisible to listFilesInPath("").
 func init() {
 	_ = sqlite.RegisterDeterministicScalarFunction("parent_hash", 1,
 		func(_ *sqlite.FunctionContext, args []driver.Value) (driver.Value, error) {
@@ -91,10 +101,11 @@ func init() {
 			if !ok {
 				return int64(0), nil
 			}
+			end := 0
 			if i := strings.LastIndex(path, "/"); i >= 0 {
-				path = path[:i]
+				end = i
 			}
-			return int64(PHash(path)), nil
+			return int64(PHash(path[:end])), nil
 		})
 }
 

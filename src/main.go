@@ -35,7 +35,7 @@ func main() {
 	}
 	defer journal.Close()
 
-	syncer := directory.NewSyncer(root, ignored, func(event directory.Event) {
+	syncer := directory.NewSyncer(root, ignored, journal, func(event directory.Event) {
 		select {
 		case events <- event:
 		case <-ctx.Done():
