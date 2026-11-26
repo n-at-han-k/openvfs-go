@@ -1,0 +1,18 @@
+require "database/sql"
+
+module Journal
+  #
+  # tables.gob
+  # Copyright (C) 2026 nathan <nathan@elitedesk>
+  #
+  # Distributed under terms of the MIT license.
+  #
+
+  class Table
+    attr_accessor :db, @@sql.DB
+    attr_accessor :name, string
+
+    def self.Insert(data) # (Record) -> (int64, error)
+    end
+  end
+end

@@ -15,7 +15,7 @@ type Journal struct {
 	metadataTableIsEmpty bool
 }
 
-func OpenJournal(path string) (*Journal, error) {
+func Open(path string) (*Journal, error) {
 	dsn := "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {

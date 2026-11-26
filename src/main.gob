@@ -1,0 +1,109 @@
+require "context"
+require "log"
+require "os"
+require "os/signal"
+require "path/filepath"
+require "syscall"
+require "time"
+
+require "example.com/project/packages/openvfs"
+require "example.com/project/src/directory"
+require "example.com/project/src/journal"
+
+module Main
+  def main # ()
+    root = "/path/to/sync"
+
+    if len(os.Args) > 1
+      root = os.Args[1]
+    end
+
+    dbPath = ".sync-journal.db"
+
+    ignored = lambda { |rel| # (string) -> bool
+      return rel == dbPath || rel == dbPath + "-wal" || rel == dbPath + "-shm"
+    }
+
+    ctx, cancel = signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+    defer cancel()
+
+    events = make(Chan[directory.Event], 256)
+
+    journal, err = journal.Open(filepath.Join(root, dbPath))
+    if err
+      log.Fatal(err)
+    end
+
+    defer journal.Close()
+
+    syncer = directory.NewSyncer(root, ignored, journal, lambda { |event| # (directory.Event)
+      case
+      when events << event
+      when ~ctx.Done()
+      end
+    })
+
+    go lambda {
+      syncer.Run(ctx)
+    }.()
+
+    socketPath = filepath.Join(os.TempDir(), "openvfs.sock")
+
+    go lambda {
+      openvfs.ServeAPI(ctx, socketPath, lambda { |event| # (directory.Event)
+        case
+        when events << event
+        when ~ctx.Done()
+        end
+      })
+    }.()
+
+    go lambda {
+      openvfs.Run(ctx, root, "openvfs:local", socketPath, lambda { |event| # (directory.Event)
+        case
+        when events << event
+        when ~ctx.Done()
+        end
+      })
+    }.()
+
+    go lambda {
+      directory.RunWatcher(ctx, root, ignored, lambda { |event| # (directory.Event)
+        case
+        when events << event
+        when ~ctx.Done()
+        end
+      })
+    }.()
+
+    go lambda {
+      directory.RunPoller(ctx, 30 * time.Second, lambda { |event| # (directory.Event)
+        case
+        when events << event
+        when ~ctx.Done()
+        end
+      })
+    }.()
+
+    loop do
+      case
+      when ~ctx.Done()
+        return
+      when event = ~events
+        if event.Kind == directory.Poll
+          syncer.Request(directory.SyncRequest.new(Cause: event))
+          next
+        end
+
+        case event.Kind
+        when directory.Create
+        when directory.Write
+        when directory.Remove
+        when directory.Rename
+        when directory.Chmod
+        when directory.LocalEntry
+        end
+      end
+    end
+  end
+end

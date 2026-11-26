@@ -1,0 +1,17 @@
+require "strings"
+
+module Unix
+  # Transpiled from src/openvfsfuse/strtools.{h,cpp}.
+
+  # strJoin takes a slice of strings and returns a string of all entries of the
+  # slice joined together, delimited by the joiner character.
+  def strJoin(v, joiner) # ([]string, byte) -> string
+    return strings.Join(v, string(joiner))
+  end
+
+  # strSplit takes a string, splits it at all occurances of delimiter and returns
+  # a slice of strings containing all parts without the delimiter.
+  def strSplit(str, delimiter) # (string, byte) -> []string
+    return strings.Split(str, string(delimiter))
+  end
+end

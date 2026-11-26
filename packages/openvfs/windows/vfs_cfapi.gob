@@ -1,0 +1,466 @@
+#go:build windows
+
+require "fmt"
+require "path/filepath"
+require "strings"
+require "sync"
+require "unsafe"
+
+require "github.com/deploymenttheory/go-bindings-win32/bindings/win32/storage/cloudfilters", cf
+require "golang.org/x/sys/windows"
+
+module Windows
+  # Transpiled from src/plugins/vfs/cfapi/vfs_cfapi.{h,cpp}.
+
+  # VfsCfApi is the class of the same name.
+  #
+  # Upstream is a QObject and relies on the Qt event loop to funnel the cloud
+  # filter callbacks onto the main thread, asserting that in cancelHydration()
+  # and the fetch-data handler. Here a single goroutine draining tasks plays that
+  # role, and post() is the QTimer::singleShot(0, ...) / queued invokeMethod.
+  class VfsCfApi
+    attr_accessor :params, SetupParams
+    attr_accessor :callbacks, Callbacks
+
+    attr_accessor :hydrationJobs, Hash[int64, @@CfApiHydrationJob]
+    attr_accessor :connectionKey, cf.CF_CONNECTION_KEY
+
+    # func()
+    attr_accessor :tasks, Chan[Proc]
+    attr_accessor :stopTasks, Chan[bool]
+    attr_accessor :stopOnce, sync.Once
+    attr_accessor :registryID, uint64
+    attr_accessor :token, @@callbackToken
+
+    # runTasks is the main thread upstream asserts it is on.
+    def self.runTasks # ()
+      loop do
+        case
+        when ~self.stopTasks
+          return
+        when task = ~self.tasks
+          task()
+        end
+      end
+    end
+
+    # post queues work onto the task goroutine. Windows calls the cloud filter
+    # callbacks on its own threads, so everything touching hydrationJobs goes
+    # through here.
+    def self.post(task) # func() -> ()
+      case
+      when self.tasks << task
+      when ~self.stopTasks
+      end
+    end
+
+    # callbackContext is the opaque context handed to CfConnectSyncRoot.
+    def self.callbackContext # () -> unsafe.Pointer
+      return registerVfs(self)
+    end
+
+    # Params is Vfs::params().
+    def self.Params # () -> SetupParams
+      return self.params
+    end
+
+    # Mode is VfsCfApi::mode().
+    def self.Mode # () -> Mode
+      return ModeWindowsCfApi
+    end
+
+    # Start is Vfs::start(), which stores the parameters and calls startImpl().
+    def self.Start(params, callbacks) # (SetupParams, Callbacks)
+      self.params = params
+      self.callbacks = callbacks
+      self.startImpl(params)
+    end
+
+    # startImpl is VfsCfApi::startImpl().
+    def self.startImpl(params) # (SetupParams)
+      RegisterSyncRoot(params, lambda { |errorMessage| # (string)
+        if errorMessage == ""
+          connectResult, err = ConnectSyncRoot(self.params.Root, self)
+          if err
+            lcCfApi.Critical("Initialization failed, couldn't connect sync root: %v", err)
+            return
+          end
+
+          self.connectionKey = connectResult
+
+          if self.callbacks.Started != nil
+            self.callbacks.Started()
+          end
+        else
+          lcCfApi.Critical("%s", errorMessage)
+
+          if self.callbacks.Error != nil
+            self.callbacks.Error(errorMessage)
+          end
+        end
+      })
+    end
+
+    # Stop is VfsCfApi::stop().
+    def self.Stop # ()
+      if self.connectionKey != 0
+        if (err = DisconnectSyncRoot(self.connectionKey))
+          lcCfApi.Critical("Disconnect failed for %s : %v", self.params.FilesystemPath(), err)
+        end
+
+        self.connectionKey = 0
+      end
+
+      self.stopOnce.Do(lambda {
+        close(self.stopTasks)
+        unregisterVfs(self.registryID)
+      })
+    end
+
+    # UnregisterFolder is VfsCfApi::unregisterFolder().
+    def self.UnregisterFolder # ()
+      if (err = UnregisterSyncRoot(self.params))
+        lcCfApi.Critical("Unregistration failed for %s : %v", self.params.FilesystemPath(), err)
+      end
+    end
+
+    # SocketAPIPinStateActionsShown is
+    # VfsCfApi::socketApiPinStateActionsShown().
+    def self.SocketAPIPinStateActionsShown # () -> bool
+      return false
+    end
+
+    # updateMetadata is VfsCfApi::updateMetadata().
+    def self.updateMetadata(syncItem, filePath, replacesFile) # (SyncFileItem, string, string) -> (ConvertToPlaceholderResult, error)
+      replacesPath = ""
+
+      if replacesFile != ""
+        replacesPath = replacesFile
+      end
+
+      handle = CreateHandleDefault(filePath)
+      defer handle.Close()
+
+      unless handle.IsValid()
+        errorMessage = fmt.Errorf("Couldn't create handle for placeholder %s Error: %s", filePath, handle.ErrorMessage())
+        lcCfApi.Warning("%v %s", errorMessage, replacesPath)
+
+        return 0, errorMessage
+      end
+
+      if syncItem.Type == ItemTypeVirtualFileDehydration
+        result, err = DehydratePlaceholder(handle, syncItem.FileID)
+
+        return result, err
+      end
+
+      if FindPlaceholderInfoBasic(handle, false).IsValid()
+        return UpdatePlaceholderInfo(handle, syncItem.Modtime, syncItem.Size, syncItem.FileID,
+          replacesPath, syncItem.Type != ItemTypeVirtualFile)
+      end
+
+      return ConvertToPlaceholder(handle, syncItem.Modtime, syncItem.Size, syncItem.FileID, replacesPath)
+    end
+
+    # UpdateMetadata exposes the protected updateMetadata() hook.
+    def self.UpdateMetadata(syncItem, filePath, replacesFile) # (SyncFileItem, string, string) -> (ConvertToPlaceholderResult, error)
+      return self.updateMetadata(syncItem, filePath, replacesFile)
+    end
+
+    # CreatePlaceholder is VfsCfApi::createPlaceholder().
+    def self.CreatePlaceholder(item) # (SyncFileItem) -> error
+      return CreatePlaceholderInfo(filepath.Join(self.params.Root, item.LocalName),
+        item.Modtime, item.Size, item.FileID, item.Type == ItemTypeDirectory)
+    end
+
+    # NeedsMetadataUpdate is VfsCfApi::needsMetadataUpdate().
+    def self.NeedsMetadataUpdate(item) # (SyncFileItem) -> bool
+      handle = CreateHandleDefault(filepath.Join(self.params.Root, item.LocalName))
+      defer handle.Close()
+
+      unless handle.IsValid()
+        if handle.Error() == windows.ERROR_FILE_NOT_FOUND || handle.Error() == windows.ERROR_PATH_NOT_FOUND
+          return false
+        end
+
+        lcCfApi.Warning("Couldn't create handle for placeholder %s Error: %s", handle.Path(), handle.ErrorMessage())
+
+        return false
+      end
+
+      return !FindPlaceholderInfoBasic(handle, false).IsValid()
+    end
+
+    # IsDehydratedPlaceholder is VfsCfApi::isDehydratedPlaceholder().
+    def self.IsDehydratedPlaceholder(filePath) # (string) -> bool
+      return IsDehydratedPlaceholder(filePath)
+    end
+
+    # StatTypeVirtualFile is VfsCfApi::statTypeVirtualFile().
+    def self.StatTypeVirtualFile(fileInfo) # (LocalInfo) -> LocalInfo
+      # only get placeholder info if it's a file
+      if fileInfo.Type == ItemTypeFile
+        handle = CreateHandleDefault(fileInfo.Path)
+        defer handle.Close()
+
+        unless handle.IsValid()
+          lcCfApi.Warning("Couldn't create handle for placeholder %s", fileInfo.Path)
+
+          return LocalInfo.new()
+        end
+
+        placeholderInfo = FindPlaceholderInfoBasic(handle, false)
+
+        if placeholderInfo.IsValid()
+          attributeInfo, err = getFileAttributeTagInfo(handle.Handle())
+          if err
+            lcCfApi.Critical("GetFileInformationByHandle failed on %s %v", fileInfo.Path, err)
+
+            return LocalInfo.new()
+          end
+
+          placeholderState = cf.CfGetPlaceholderStateFromAttributeTag(attributeInfo.FileAttributes, attributeInfo.ReparseTag)
+
+          if placeholderState & cf.CF_PLACEHOLDER_STATE_PLACEHOLDER != 0
+            if placeholderState & cf.CF_PLACEHOLDER_STATE_PARTIAL != 0
+              if placeholderInfo.PinState() == PinAlwaysLocal
+                fileInfo.Type = ItemTypeVirtualFileDownload
+              else
+                fileInfo.Type = ItemTypeVirtualFile
+              end
+            else
+              if placeholderInfo.PinState() == PinOnlineOnly
+                fileInfo.Type = ItemTypeVirtualFileDehydration
+              end
+
+              # else nothing to do
+            end
+          end
+        end
+      end
+
+      return fileInfo
+    end
+
+    # SetPinState is VfsCfApi::setPinState().
+    def self.SetPinState(folderPath, state) # (string, PinState) -> bool
+      lcCfApi.Debug("setPinState %s %d", folderPath, state)
+
+      localPath = filepath.Join(self.params.Root, folderPath)
+      handle = CreateHandleDefault(localPath)
+      defer handle.Close()
+
+      unless handle.IsValid()
+        lcCfApi.Warning("Couldn't create handle for placeholder %s", localPath)
+
+        return false
+      end
+
+      _, err = SetPinState(handle, state, Recurse)
+
+      return err == nil
+    end
+
+    # PinState is VfsCfApi::pinState().
+    def self.PinState(folderPath) # (string) -> (PinState, bool)
+      localPath = filepath.Join(self.params.Root, folderPath)
+      handle = CreateHandleDefault(localPath)
+      defer handle.Close()
+
+      unless handle.IsValid()
+        lcCfApi.Warning("Couldn't create handle for placeholder %s", localPath)
+
+        return 0, false
+      end
+
+      info = FindPlaceholderInfoBasic(handle, false)
+
+      unless info.IsValid()
+        lcCfApi.Debug("Couldn't find pin state for regular non-placeholder file %s", localPath)
+
+        return 0, false
+      end
+
+      return info.PinState(), true
+    end
+
+    # Availability is VfsCfApi::availability().
+    def self.Availability(folderPath) # (string) -> AvailabilityResult
+      basePinState, ok = self.PinState(folderPath)
+
+      if ok
+        case basePinState
+        when PinAlwaysLocal
+          return AvailabilityOf(AvailabilityAlwaysLocal)
+        when PinInherited
+        when PinOnlineOnly
+          return AvailabilityOf(AvailabilityOnlineOnly)
+        when PinUnspecified
+        when PinExcluded
+        end
+
+        return AvailabilityOf(AvailabilityMixed)
+      end
+
+      return AvailabilityErrorOf(AvailabilityErrorNoSuchItem)
+    end
+
+    # CancelHydration is VfsCfApi::cancelHydration(). It must run on the task
+    # goroutine, which is where the cancel callback posts it.
+    def self.CancelHydration(context) # (CallBackContext)
+      # Find matching hydration job for request id
+      if (hydrationJob, ok = self.hydrationJobs[context.TransferKey])
+        lcCfApi.Info("Cancel hydration %s", hydrationJob.Context())
+        # the job itself will take care of hydrationJobs and its deletion
+        hydrationJob.Abort()
+      end
+    end
+
+    # FileStatusChanged is VfsCfApi::fileStatusChanged().
+    def self.FileStatusChanged(systemFileName, fileStatus) # (string, SyncFileStatusTag)
+      handle = CreateHandleDefault(systemFileName)
+      defer handle.Close()
+
+      unless handle.IsValid()
+        if handle.Error() == windows.ERROR_FILE_NOT_FOUND || handle.Error() == windows.ERROR_PATH_NOT_FOUND
+          return
+        end
+
+        lcCfApi.Warning("Couldn't create handle for placeholder %s Error: %s", handle.Path(), handle.ErrorMessage())
+
+        return
+      end
+
+      if fileStatus == StatusUpToDate
+        info = FindPlaceholderInfoBasic(handle, false)
+
+        if info.IsValid()
+          _, _ = UpdatePlaceholderMarkInSync(info.Handle())
+
+          if info.PinState() == PinExcluded
+            # clear possible exclude flag
+            # a file usually does not change from excluded to not excluded, but ...
+            _, _ = SetPinState(handle, PinInherited, Recurse)
+          end
+        end
+      elsif fileStatus == StatusExcluded
+        _, _ = SetPinState(handle, PinExcluded, Recurse)
+      end
+    end
+  end
+
+  # compile-time check that the plugin satisfies the interface it is selected by.
+  #
+  # NOT PORTED. Gob has no spelling for a blank package-level assignment with a
+  # pointer conversion:
+  #
+  #	var _ Vfs = (*VfsCfApi)(nil)
+
+  # NewVfsCfApi is the VfsCfApi constructor.
+  def NewVfsCfApi # () -> *VfsCfApi
+    v = @VfsCfApi.new(
+      hydrationJobs: Hash[int64, @@CfApiHydrationJob].new(),
+      tasks: make(Chan[Proc], 64),
+      stopTasks: make(Chan[bool])
+    )
+
+    go lambda {
+      v.runTasks()
+    }.()
+
+    return v
+  end
+
+  # CfApiVfsPluginFactory is the class of the same name.
+  class CfApiVfsPluginFactory
+    # Create is DefaultPluginFactory<VfsCfApi>::create().
+    def Create # () -> Vfs
+      return NewVfsCfApi()
+    end
+
+    # Prepare is CfApiVfsPluginFactory::prepare().
+    def Prepare(path, accountUUID) # (string, string) -> error
+      if isRootPath(path)
+        return fmt.Errorf("The Virtual filesystem feature does not support a drive as sync root")
+      end
+
+      fileSystem, err = fileSystemForPath(path)
+      if err
+        return fmt.Errorf("The Virtual filesystem feature requires a NTFS file system, %s is using %s", path, fileSystem)
+      end
+
+      unless strings.HasPrefix(strings.ToUpper(fileSystem), "NTFS")
+        return fmt.Errorf("The Virtual filesystem feature requires a NTFS file system, %s is using %s", path, fileSystem)
+      end
+
+      driveType, err = getDriveType(path)
+
+      if err == nil && driveType == windows.DRIVE_REMOTE
+        return fmt.Errorf("The Virtual filesystem feature is not supported on network drives")
+      end
+
+      return nil
+    end
+  end
+
+  # isRootPath is QDir(path).isRoot().
+  def isRootPath(path) # (string) -> bool
+    clean = filepath.Clean(path)
+
+    return clean == filepath.VolumeName(clean) + string(filepath.Separator)
+  end
+
+  # fileSystemForPath is FileSystem::fileSystemForPath().
+  def fileSystemForPath(path) # (string) -> (string, error)
+    root = filepath.VolumeName(filepath.Clean(path)) + string(filepath.Separator)
+
+    wroot, err = windows.UTF16PtrFromString(root)
+    if err
+      return "", err
+    end
+
+    var :name, Array[uint16, windows.MAX_PATH + 1]
+    var :serial, uint32
+    var :maxComp, uint32
+    var :flags, uint32
+    var :fsName, Array[uint16, windows.MAX_PATH + 1]
+
+    if (err = windows.GetVolumeInformation(wroot, @name[0], uint32(len(name)), @serial, @maxComp, @flags,
+      @fsName[0], uint32(len(fsName))))
+      return "", err
+    end
+
+    return windows.UTF16ToString(fsName[]), nil
+  end
+
+  # getDriveType is GetDriveTypeW() on the first three characters of the path,
+  # which is what upstream passes.
+  def getDriveType(path) # (string) -> (uint32, error)
+    root = filepath.VolumeName(filepath.Clean(path)) + string(filepath.Separator)
+
+    wroot, err = windows.UTF16PtrFromString(root)
+    if err
+      return 0, err
+    end
+
+    return windows.GetDriveType(wroot), nil
+  end
+
+  # getInode is FileSystem::getInode(): the NTFS file index stands in for it.
+  def getInode(path) # (string) -> (uint64, bool)
+    handle = CreateHandleDefault(path)
+    defer handle.Close()
+
+    unless handle.IsValid()
+      return 0, false
+    end
+
+    var :info, windows.ByHandleFileInformation
+
+    if (err = windows.GetFileInformationByHandle(handle.Handle(), @info))
+      return 0, false
+    end
+
+    return uint64(info.FileIndexHigh) << 32 | uint64(info.FileIndexLow), true
+  end
+end

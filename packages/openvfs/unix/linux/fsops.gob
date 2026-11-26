@@ -1,0 +1,32 @@
+#go:build linux
+
+require "github.com/hanwen/go-fuse/v2/fuse", gofuse
+require "golang.org/x/sys/unix"
+
+module Linux
+  # Shims for the handful of calls whose shape differs between Linux and macOS.
+
+  # statMode widens st_mode, which is 32 bit on Linux and 16 bit on macOS.
+  def statMode(st) # (*unix.Stat_t) -> uint32
+    return st.Mode
+  end
+
+  def fillStatfs(out, st) # (*gofuse.StatfsOut, *unix.Statfs_t)
+    out.Blocks = st.Blocks
+    out.Bfree = st.Bfree
+    out.Bavail = st.Bavail
+    out.Files = st.Files
+    out.Ffree = st.Ffree
+    out.Bsize = uint32(st.Bsize)
+    out.NameLen = uint32(st.Namelen)
+    out.Frsize = uint32(st.Frsize)
+  end
+
+  def mknodAt(dirfd, rel, mode, dev) # (int, string, uint32, uint32) -> error
+    return unix.Mknodat(dirfd, rel, mode, int(dev))
+  end
+
+  def mkfifoAt(dirfd, rel, mode) # (int, string, uint32) -> error
+    return unix.Mkfifoat(dirfd, rel, mode)
+  end
+end

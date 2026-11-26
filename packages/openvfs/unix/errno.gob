@@ -1,0 +1,56 @@
+#go:build linux || darwin
+
+require "syscall"
+
+require "golang.org/x/sys/unix"
+
+module Unix
+  # unixUtimeOmit is UTIME_OMIT from <sys/stat.h>: leave this timestamp alone.
+  UNIX_UTIME_OMIT = 1073741822
+
+  # errnoValue is the errno behind an error, which upstream reads from the global.
+  def errnoValue(err) # (error) -> int
+    if err == nil
+      return 0
+    end
+
+    if (e, ok = err.(unix.Errno))
+      return int(e)
+    end
+
+    if (e, ok = err.(syscall.Errno))
+      return int(e)
+    end
+
+    return int(syscall.EIO)
+  end
+
+  # asErrno converts a syscall error into the negative errno upstream returns
+  # from a fuse callback.
+  def asErrno(err) # (error) -> syscall.Errno
+    if err == nil
+      return 0
+    end
+
+    if (e, ok = err.(unix.Errno))
+      return syscall.Errno(e)
+    end
+
+    if (e, ok = err.(syscall.Errno))
+      return e
+    end
+
+    return syscall.EIO
+  end
+
+  # isErrRange reports ERANGE, the signal Xattr::CPP::getxattr retries on.
+  def isErrRange(err) # (error) -> bool
+    return err == unix.ERANGE
+  end
+
+  # The errno values the hydration path returns, named once so that the shared
+  # code in openvfsfuse.gob does not have to reach for a platform package.
+  ERR_PERM = int(syscall.EPERM)
+  ERR_IO = int(syscall.EIO)
+  ERR_TIMED_OUT = int(syscall.ETIMEDOUT)
+end

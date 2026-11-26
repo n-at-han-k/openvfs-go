@@ -1,0 +1,697 @@
+#go:build linux || darwin
+
+require "context"
+require "os"
+require "strconv"
+require "syscall"
+require "time"
+require "unsafe"
+
+require "github.com/hanwen/go-fuse/v2/fs"
+require "github.com/hanwen/go-fuse/v2/fuse", gofuse
+require "golang.org/x/sys/unix"
+
+module Unix
+  # The libfuse facing half of src/openvfsfuse/openvfsfuse.cpp, on top of
+  # go-fuse. go-fuse's node API replaces libfuse's path based callbacks, so
+  # Lookup is new, chmod/chown/truncate/utimens arrive as one Setattr, and
+  # read/write/flush come from the loopback file.
+
+  def openRootHandle(path) # (string) -> (int, error)
+    return unix.Open(path, unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC, 0)
+  end
+
+  def closeRootHandle(handle) # (int)
+    unix.Close(handle)
+  end
+
+  def setUmaskZero # ()
+    unix.Umask(0)
+  end
+
+  def callerOf(ctx) # (context.Context) -> *callerInfo
+    caller, ok = gofuse.FromContext(ctx)
+
+    if !ok || caller == nil
+      return nil
+    end
+
+    return @callerInfo.new(Pid: caller.Pid, Uid: caller.Uid, Gid: caller.Gid)
+  end
+
+  # placeHolderFromAttributesAt is PlaceHolderFromAttributes for a path below the
+  # mount, resolved against the pre-mount root descriptor. absolutePath is kept
+  # for the external name upstream carries in PlaceHolderAttributes.
+  def placeHolderFromAttributesAt(dirfd, rel, absolutePath) # (int, string, string) -> (PlaceHolderAttributes, bool)
+    data, ok = xattrGetAtString(dirfd, rel, XAttrData)
+
+    unless ok
+      return PlaceHolderAttributes.new(), false
+    end
+
+    return PlaceHolderFromData(absolutePath, Array[byte].new(data)), true
+  end
+
+  def statAttr(out, st) # (*gofuse.Attr, *unix.Stat_t)
+    # Go casts to (*syscall.Stat_t); Gob has no spelling for a conversion to a
+    # pointer type.
+    out.FromStat(unsafe.Pointer(st))
+  end
+
+  # node is one path in the mounted tree. rel is the path relative to the root
+  # descriptor; upstream's internal path is "./" + rel.
+  #
+  # Upstream embeds fs.Inode; Gob has no spelling for an embedded field, so it
+  # is a named one here.
+  var node = Struct.new(Inode: fs.Inode, v: @@VFSFuseContext, rel: string) do
+    # relPath is the path handed to the *at() syscalls. "." is the root itself.
+    def self.relPath # () -> string
+      if self.rel == ""
+        return "."
+      end
+
+      return self.rel
+    end
+
+    # internal is VFSFuseContext::getInternalPath() of this node, which is the name
+    # every operation is logged under. FUSE names the root "/", so the root's
+    # internal path is "./".
+    def self.internal # () -> string
+      return self.v.getInternalPath("/" + self.rel)
+    end
+
+    def self.childRel(name) # (string) -> string
+      if self.rel == ""
+        return name
+      end
+
+      return self.rel + "/" + name
+    end
+
+    def self.childInternal(name) # (string) -> string
+      return self.v.getInternalPath("/" + self.childRel(name))
+    end
+
+    # external is getExternalPath() of this node.
+    def self.external # () -> string
+      return self.v.getExternalPath(self.internal())
+    end
+
+    def self.lstat(rel) # (string) -> (unix.Stat_t, error)
+      var :st, unix.Stat_t
+
+      err = unix.Fstatat(self.v.rootHandle, rel, @st, unix.AT_SYMLINK_NOFOLLOW)
+
+      return st, err
+    end
+
+    def self.newChild(ctx, rel, st) # (context.Context, string, unix.Stat_t) -> *fs.Inode
+      return self.NewInode(ctx, @node.new(v: self.v, rel: rel), fs.StableAttr.new(Mode: statMode(@st), Ino: st.Ino))
+    end
+
+    # Lookup has no upstream counterpart: the libfuse high level API derives it
+    # from getattr. It is the node API's equivalent of that lstat.
+    def self.Lookup(ctx, name, out) # (context.Context, string, *gofuse.EntryOut) -> (*fs.Inode, syscall.Errno)
+      rel = self.childRel(name)
+
+      st, err = self.lstat(rel)
+      if err
+        return nil, asErrno(err)
+      end
+
+      statAttr(@out.Attr, @st)
+
+      return self.newChild(ctx, rel, st), 0
+    end
+
+    def self.Getattr(ctx, f, out) # (context.Context, fs.FileHandle, *gofuse.AttrOut) -> syscall.Errno
+      path = self.internal()
+      rel = self.relPath()
+
+      st, err = self.lstat(rel)
+      openvfsfuseLog(callerOf(ctx), path, "getattr", rc(err), "getattr inode: %d", st.Ino)
+
+      if err
+        return asErrno(err)
+      end
+
+      statAttr(@out.Attr, @st)
+
+      # check virtual size if size is 0 and path is not a dir
+      if statMode(@st) & unix.S_IFMT != unix.S_IFDIR && st.Size == 0
+        if (attr, ok = placeHolderFromAttributesAt(self.v.rootHandle, rel, self.external()))
+          out.Size = attr.Size
+        end
+      end
+
+      return 0
+    end
+
+    def self.Access(ctx, mask) # (context.Context, uint32) -> syscall.Errno
+      path = self.internal()
+      err = unix.Faccessat(self.v.rootHandle, self.relPath(), mask, 0)
+      openvfsfuseLog(callerOf(ctx), path, "access", rc(err), "")
+
+      return asErrno(err)
+    end
+
+    def self.Readlink(ctx) # (context.Context) -> ([]byte, syscall.Errno)
+      path = self.internal()
+      buf = make(Array[byte], unix.PathMax)
+
+      res, err = unix.Readlinkat(self.v.rootHandle, self.relPath(), buf)
+      openvfsfuseLog(callerOf(ctx), path, "readlink", rc(err), "readlink")
+
+      if err
+        return nil, asErrno(err)
+      end
+
+      return buf[...res], 0
+    end
+
+    def self.Readdir(ctx) # (context.Context) -> (fs.DirStream, syscall.Errno)
+      path = self.internal()
+
+      fd, err = unix.Openat(self.v.rootHandle, self.relPath(), unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC, 0)
+      if err
+        openvfsfuseLog(callerOf(ctx), path, "readdir", -1, "")
+        return nil, asErrno(err)
+      end
+
+      # The stream fills st_ino and st_mode from d_ino and d_type, as upstream
+      # does by hand, and closes the descriptor when it is released.
+      stream, errno = fs.NewLoopbackDirStreamFd(fd)
+
+      if errno != 0
+        unix.Close(fd)
+        openvfsfuseLog(callerOf(ctx), path, "readdir", -1, "")
+        return nil, errno
+      end
+
+      openvfsfuseLog(callerOf(ctx), path, "readdir", 0, "")
+
+      return stream, 0
+    end
+
+    # lchownToCaller is the lchown() upstream performs after creating an entry, so
+    # the new name belongs to the process that asked for it rather than to the
+    # fuse server.
+    def self.lchownToCaller(ctx, rel) # (context.Context, string)
+      caller = callerOf(ctx)
+
+      if caller == nil
+        return
+      end
+
+      _ = unix.Fchownat(self.v.rootHandle, rel, int(caller.Uid), int(caller.Gid), unix.AT_SYMLINK_NOFOLLOW)
+    end
+
+    def self.Mknod(ctx, name, mode, dev, out) # (context.Context, string, uint32, uint32, *gofuse.EntryOut) -> (*fs.Inode, syscall.Errno)
+      path = self.childInternal(name)
+      rel = self.childRel(name)
+      caller = callerOf(ctx)
+
+      var :err, error
+
+      case mode & unix.S_IFMT
+      when unix.S_IFREG
+        var :fd, int
+
+        fd, err = unix.Openat(self.v.rootHandle, rel, unix.O_CREAT | unix.O_EXCL | unix.O_WRONLY | unix.O_CLOEXEC, mode)
+        openvfsfuseLog(caller, path, "mknod", rc(err), "mknod %o S_IFREG (normal file creation)", mode)
+
+        if err == nil
+          err = unix.Close(fd)
+        end
+      when unix.S_IFIFO
+        err = mkfifoAt(self.v.rootHandle, rel, mode)
+        openvfsfuseLog(caller, path, "mkfifo", rc(err), "mkfifo %o S_IFFIFO (fifo creation)", mode)
+      else
+        err = mknodAt(self.v.rootHandle, rel, mode, dev)
+
+        if mode & unix.S_IFMT == unix.S_IFCHR
+          openvfsfuseLog(caller, path, "mknod", rc(err), "mknod %o (character device creation)", mode)
+        else
+          openvfsfuseLog(caller, path, "mknod", rc(err), "mknod %o", mode)
+        end
+      end
+
+      if err
+        return nil, asErrno(err)
+      end
+
+      self.lchownToCaller(ctx, rel)
+
+      st, err = self.lstat(rel)
+      if err
+        return nil, asErrno(err)
+      end
+
+      statAttr(@out.Attr, @st)
+
+      return self.newChild(ctx, rel, st), 0
+    end
+
+    def self.Mkdir(ctx, name, mode, out) # (context.Context, string, uint32, *gofuse.EntryOut) -> (*fs.Inode, syscall.Errno)
+      path = self.childInternal(name)
+      rel = self.childRel(name)
+
+      err = unix.Mkdirat(self.v.rootHandle, rel, mode)
+      openvfsfuseLog(callerOf(ctx), path, "mkdir", rc(err), "mkdir mode %o", mode)
+
+      if err
+        return nil, asErrno(err)
+      end
+
+      self.lchownToCaller(ctx, rel)
+
+      st, err = self.lstat(rel)
+      if err
+        return nil, asErrno(err)
+      end
+
+      statAttr(@out.Attr, @st)
+
+      return self.newChild(ctx, rel, st), 0
+    end
+
+    def self.Unlink(ctx, name) # (context.Context, string) -> syscall.Errno
+      path = self.childInternal(name)
+      err = unix.Unlinkat(self.v.rootHandle, self.childRel(name), 0)
+      openvfsfuseLog(callerOf(ctx), path, "unlink", rc(err), "")
+
+      return asErrno(err)
+    end
+
+    def self.Rmdir(ctx, name) # (context.Context, string) -> syscall.Errno
+      path = self.childInternal(name)
+      err = unix.Unlinkat(self.v.rootHandle, self.childRel(name), unix.AT_REMOVEDIR)
+      openvfsfuseLog(callerOf(ctx), path, "rmdir", rc(err), "")
+
+      return asErrno(err)
+    end
+
+    def self.Symlink(ctx, target, name, out) # (context.Context, string, string, *gofuse.EntryOut) -> (*fs.Inode, syscall.Errno)
+      to = self.childInternal(name)
+      rel = self.childRel(name)
+
+      err = unix.Symlinkat(target, self.v.rootHandle, rel)
+      openvfsfuseLog(callerOf(ctx), to, "symlink", rc(err), "symlink from %s to %s", target, to)
+
+      if err
+        return nil, asErrno(err)
+      end
+
+      self.lchownToCaller(ctx, rel)
+
+      st, err = self.lstat(rel)
+      if err
+        return nil, asErrno(err)
+      end
+
+      statAttr(@out.Attr, @st)
+
+      return self.newChild(ctx, rel, st), 0
+    end
+
+    def self.Link(ctx, target, name, out) # (context.Context, fs.InodeEmbedder, string, *gofuse.EntryOut) -> (*fs.Inode, syscall.Errno)
+      other, ok = target.(@@node)
+
+      unless ok
+        return nil, syscall.EINVAL
+      end
+
+      to = self.childInternal(name)
+      rel = self.childRel(name)
+
+      err = unix.Linkat(other.v.rootHandle, other.relPath(), self.v.rootHandle, rel, 0)
+      openvfsfuseLog(callerOf(ctx), to, "link", rc(err), "hard link from %s to %s", other.internal(), to)
+
+      if err
+        return nil, asErrno(err)
+      end
+
+      self.lchownToCaller(ctx, rel)
+
+      st, err = self.lstat(rel)
+      if err
+        return nil, asErrno(err)
+      end
+
+      statAttr(@out.Attr, @st)
+
+      return self.newChild(ctx, rel, st), 0
+    end
+
+    def self.Rename(ctx, oldName, newParent, newName, flags) # (context.Context, string, *fs.Inode, string, uint32) -> syscall.Errno
+      other, ok = newParent.Operations().(@@node)
+
+      unless ok
+        return syscall.EINVAL
+      end
+
+      # Upstream discards the flags and always does a plain rename(2).
+      _ = flags
+      from = self.childInternal(oldName)
+      to = other.childInternal(newName)
+
+      err = unix.Renameat(self.v.rootHandle, self.childRel(oldName), other.v.rootHandle, other.childRel(newName))
+      openvfsfuseLog(callerOf(ctx), from, "rename", rc(err), "rename %s to %s", from, to)
+
+      return asErrno(err)
+    end
+
+    # Setattr covers upstream's chmod, chown, truncate and utimens callbacks, which
+    # the node API funnels into one entry point.
+    def self.Setattr(ctx, f, in_, out) # (context.Context, fs.FileHandle, *gofuse.SetAttrIn, *gofuse.AttrOut) -> syscall.Errno
+      path = self.internal()
+      rel = self.relPath()
+      caller = callerOf(ctx)
+
+      if (mode, ok = in_.GetMode())
+        err = unix.Fchmodat(self.v.rootHandle, rel, mode, 0)
+        openvfsfuseLog(caller, path, "chmod", rc(err), "chmod to %o", mode)
+
+        if err
+          return asErrno(err)
+        end
+      end
+
+      uid, hasUID = in_.GetUID()
+      gid, hasGID = in_.GetGID()
+
+      if hasUID || hasGID
+        u, g = -1, -1
+
+        if hasUID
+          u = int(uid)
+        end
+
+        if hasGID
+          g = int(gid)
+        end
+
+        err = unix.Fchownat(self.v.rootHandle, rel, u, g, unix.AT_SYMLINK_NOFOLLOW)
+        username, userOK = getusername(uint32(u))
+        groupname, groupOK = getgroupname(uint32(g))
+
+        if userOK && groupOK
+          openvfsfuseLog(caller, path, "chown", rc(err), "chown to %d:%d %s:%s", u, g, username, groupname)
+        else
+          openvfsfuseLog(caller, path, "chown", rc(err), "chown to %d:%d", u, g)
+        end
+
+        if err
+          return asErrno(err)
+        end
+      end
+
+      if (size, ok = in_.GetSize())
+        # f is set when the truncation goes through an open descriptor and nil
+        # for a path-based truncate(). Truncating through a descriptor must not
+        # be re-checked against the file's mode, so use it when it is there.
+        var :err, error
+
+        if (vf, isVFS = f.(@@vfsFile))
+          err = unix.Ftruncate(vf.fd, int64(size))
+        else
+          fd, openErr = unix.Openat(self.v.rootHandle, rel, unix.O_WRONLY | unix.O_CLOEXEC, 0)
+
+          if openErr
+            err = openErr
+          else
+            err = unix.Ftruncate(fd, int64(size))
+            unix.Close(fd)
+          end
+        end
+
+        if err
+          openvfsfuseLog(caller, path, "truncate", -1, "truncate to %d bytes", size)
+          return asErrno(err)
+        end
+
+        openvfsfuseLog(caller, path, "truncate", 0, "truncate to %d bytes", size)
+      end
+
+      atime, hasATime = in_.GetATime()
+      mtime, hasMTime = in_.GetMTime()
+
+      if hasATime || hasMTime
+        # UTIME_OMIT for a time the kernel did not send, as libfuse passes on.
+        ts = Array[unix.Timespec].new(
+          { Sec: 0, Nsec: UNIX_UTIME_OMIT },
+          { Sec: 0, Nsec: UNIX_UTIME_OMIT }
+        )
+
+        if hasATime
+          ts[0] = unix.NsecToTimespec(atime.UnixNano())
+        end
+
+        if hasMTime
+          ts[1] = unix.NsecToTimespec(mtime.UnixNano())
+        end
+
+        err = unix.UtimesNanoAt(self.v.rootHandle, rel, ts, unix.AT_SYMLINK_NOFOLLOW)
+        openvfsfuseLog(caller, path, "utimens", rc(err), "")
+
+        if err
+          return asErrno(err)
+        end
+      end
+
+      st, err = self.lstat(rel)
+      if err
+        return asErrno(err)
+      end
+
+      statAttr(@out.Attr, @st)
+
+      return 0
+    end
+
+    def self.Statfs(ctx, out) # (context.Context, *gofuse.StatfsOut) -> syscall.Errno
+      path = self.internal()
+      var :st, unix.Statfs_t
+
+      err = unix.Fstatfs(self.v.rootHandle, @st)
+      openvfsfuseLog(callerOf(ctx), path, "statfs", rc(err), "")
+
+      if err
+        return asErrno(err)
+      end
+
+      fillStatfs(out, @st)
+
+      return 0
+    end
+
+    def self.Open(ctx, flags) # (context.Context, uint32) -> (fs.FileHandle, uint32, syscall.Errno)
+      path = self.internal()
+      rel = self.relPath()
+      caller = callerOf(ctx)
+
+      opener = getcallername(caller)
+
+      openvfsfuseLog(caller, path, "open", 0, "%d %s by %s", flags, path, opener)
+
+      var :callerPid, uint32
+
+      if caller != nil
+        callerPid = caller.Pid
+      end
+
+      # The desktop client must not be blocked from accessing the file
+      # to be able to overwrite it.
+      if callerBelongsToProcess(callerPid, self.v.jobs.DesktopClientPID())
+        openvfsfuseLog(caller, path, "open", 0, "Desktop client tries to access, bypassing!")
+      else
+        attribs, haveAttribs = placeHolderFromAttributesAt(self.v.rootHandle, rel, self.external())
+
+        if haveAttribs && attribs.State == StateDehydrated
+          # the file is virtual. It will be hydrated if the calling instance
+          # is not on the ignore list
+          errno = self.v.requestHydration(caller, path, attribs)
+
+          if errno != 0
+            return nil, 0, syscall.Errno(errno)
+          end
+        end
+      end
+
+      # File is not dehydrated and it is just going to be opened
+      fd, err = unix.Openat(self.v.rootHandle, rel, int(flags) | unix.O_CLOEXEC, 0)
+
+      if err
+        return nil, 0, asErrno(err)
+      end
+
+      return newVFSFile(fd), 0, 0
+    end
+
+    def self.Create(ctx, name, flags, mode, out) # (context.Context, string, uint32, uint32, *gofuse.EntryOut) -> (*fs.Inode, fs.FileHandle, uint32, syscall.Errno)
+      path = self.childInternal(name)
+      rel = self.childRel(name)
+      caller = callerOf(ctx)
+
+      fd, err = unix.Openat(self.v.rootHandle, rel, int(flags) | unix.O_CLOEXEC, mode)
+      if err
+        openvfsfuseLog(caller, path, "create", -1, "create %o", mode)
+        return nil, nil, 0, asErrno(err)
+      end
+
+      if caller != nil
+        if (chownErr = unix.Fchown(fd, int(caller.Uid), int(caller.Gid)))
+          cleanupErr = unix.Unlinkat(self.v.rootHandle, rel, 0)
+          unix.Close(fd)
+          openvfsfuseLog(caller, path, "create", -1, "set ownership after create %o", mode)
+
+          if cleanupErr
+            openvfsfuseLog(caller, path, "create", -1, "failed to remove incomplete file: errno %d", errnoValue(cleanupErr))
+          end
+
+          return nil, nil, 0, asErrno(chownErr)
+        end
+      end
+
+      openvfsfuseLog(caller, path, "create", 0, "create %o", mode)
+
+      var :st, unix.Stat_t
+
+      if (err = unix.Fstat(fd, @st))
+        unix.Close(fd)
+        return nil, nil, 0, asErrno(err)
+      end
+
+      statAttr(@out.Attr, @st)
+
+      return self.newChild(ctx, rel, st), newVFSFile(fd), 0, 0
+    end
+
+    # Release logs the close; the descriptor itself is closed by the file handle,
+    # which is what upstream's close(fi->fh) does.
+    def self.Release(ctx, f) # (context.Context, fs.FileHandle) -> syscall.Errno
+      openvfsfuseLog(callerOf(ctx), self.internal(), "close", 0, "")
+
+      if (r, ok = f.(fs.FileReleaser))
+        return r.Release(ctx)
+      end
+
+      return 0
+    end
+
+    def self.Fsync(ctx, f, flags) # (context.Context, fs.FileHandle, uint32) -> syscall.Errno
+      openvfsfuseLog(callerOf(ctx), self.internal(), "fsync", 0, "")
+
+      # TODO:: immplement
+      return 0
+    end
+
+    # xattr operations are optional and can safely be left unimplemented
+
+    def self.Setxattr(ctx, attr, data, flags) # (context.Context, string, []byte, uint32) -> syscall.Errno
+      return asErrno(xattrSetAt(self.v.rootHandle, self.relPath(), attr, data, int(flags)))
+    end
+
+    def self.Getxattr(ctx, attr, dest) # (context.Context, string, []byte) -> (uint32, syscall.Errno)
+      # if size is zero, getxattr returns the required size of the buffer.
+      # See https://linux.die.net/man/2/getxattr
+      copyDataResult = lambda { |s| # ([]byte) -> (uint32, syscall.Errno)
+        if len(dest) == 0
+          return uint32(len(s)), 0
+        elsif len(s) <= len(dest)
+          copy(dest, s)
+          return uint32(len(s)), 0
+        end
+
+        return 0, syscall.ERANGE
+      }
+
+      path = self.internal()
+      rel = self.relPath()
+
+      if attr == XAttrRealSize
+        st, err = self.lstat(rel)
+        if err
+          return 0, asErrno(err)
+        end
+
+        return copyDataResult(Array[byte].new(strconv.FormatInt(st.Size, 10)))
+      end
+
+      ret, err = xattrGetAt(self.v.rootHandle, rel, attr, dest)
+
+      if isErrNoAttr(err) && attr == XAttrData
+        # return the default value for the attributes
+        openvfsfuseLog(callerOf(ctx), path, "getxattr", 0, "Returning default data for %s", attr)
+        return copyDataResult(DefaultData())
+      end
+
+      if err
+        return 0, asErrno(err)
+      end
+
+      return uint32(ret), 0
+    end
+
+    def self.Listxattr(ctx, dest) # (context.Context, []byte) -> (uint32, syscall.Errno)
+      ret, err = xattrListAt(self.v.rootHandle, self.relPath(), dest)
+      if err
+        return 0, asErrno(err)
+      end
+
+      return uint32(ret), 0
+    end
+
+    def self.Removexattr(ctx, attr) # (context.Context, string) -> syscall.Errno
+      return asErrno(xattrRemoveAt(self.v.rootHandle, self.relPath(), attr))
+    end
+  end
+
+  # vfsFile is the per-open state. LoopbackFile already forwards read, write,
+  # flush, fsync and the rest to the descriptor the way upstream's pread/pwrite
+  # and release callbacks do; the descriptor is kept alongside it so Setattr can
+  # mirror the ftruncate() path.
+  #
+  # Upstream embeds *fs.LoopbackFile; Gob has no spelling for an embedded
+  # field, so it is a named one here.
+  var vfsFile = Struct.new(LoopbackFile: @@fs.LoopbackFile, fd: int)
+
+  def newVFSFile(fd) # (int) -> *vfsFile
+    return @vfsFile.new(LoopbackFile: fs.NewLoopbackFileFromOS(os.NewFile(uintptr(fd), "")), fd: fd)
+  end
+
+  # mountAndServe is the fuse_main() call at the end of initializeOpenVFSFuse().
+  def mountAndServe(ctx, c, args, report) # context.Context, *VFSFuseContext, Args, func(error) error -> error
+    # use the system inodes instead of the libfuse generated, and do not let
+    # the kernel cache anything: openVFSfuse_init()'s fuse_config.
+    zero = time.Duration(0)
+
+    opts = @fs.Options.new(
+      MountOptions: gofuse.MountOptions.new(
+        Name: "openvfs",
+        Debug: args.DebugEnabled
+      ),
+      EntryTimeout: @zero,
+      AttrTimeout: @zero,
+      NegativeTimeout: @zero
+    )
+
+    server, err = fs.Mount(args.MountPoint, @node.new(v: c), opts)
+    if err
+      return report(err)
+    end
+
+    _ = report(nil)
+
+    if ctx != nil
+      go lambda {
+        ~ctx.Done()
+        _ = server.Unmount()
+      }.()
+    end
+
+    server.Wait()
+
+    return nil
+  end
+end

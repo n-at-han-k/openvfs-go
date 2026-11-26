@@ -1,0 +1,296 @@
+# The Vfs plugin interface, transpiled from src/libsync/vfs/vfs.{h,cpp}.
+#
+# Interface describing how to deal with virtual/placeholder files.
+#
+# There are different ways of representing files locally that will only be
+# filled with data (hydrated) on demand. One such way would be suffixed files,
+# others could be FUSE based or use Windows CfAPI.
+#
+# This interface intends to decouple the sync algorithm and Folder from the
+# details of how a particular VFS solution works.
+
+require "strings"
+
+module Windows
+  # Mode is the kind of VFS in use (or no-VFS).
+  #
+  # Currently plugins and modes are one-to-one but that's not required. The raw
+  # integer values are used in Qml.
+  class Mode < uint8
+    # String is Utility::enumToString(Vfs::Mode).
+    def String # () -> string
+      case self
+      when ModeOff
+        return "off"
+      when ModeWindowsCfApi
+        return "wincfapi"
+      when ModeOpenVFS
+        return "openvfs"
+      end
+
+      return ""
+    end
+  end
+
+  const :ModeOff, 0
+  const :ModeWindowsCfApi, 1
+  const :ModeOpenVFS, 2
+
+  # ModeFromString is Vfs::modeFromString(). ok is false where upstream returns
+  # an empty Optional.
+  def ModeFromString(str) # (string) -> (Mode, bool)
+    # Note: Strings are used for the config file, so they must not change.
+    case strings.ToLower(str)
+    when "off"
+      return ModeOff, true
+    when "wincfapi"
+      return ModeWindowsCfApi, true
+    when "openvfs"
+      return ModeOpenVFS, true
+    end
+
+    return ModeOff, false
+  end
+
+  class ConvertToPlaceholderResult < uint8
+  end
+
+  const :ConvertToPlaceholderOk, 0
+  const :ConvertToPlaceholderLocked, 1
+
+  class AvailabilityError < uint8
+  end
+
+  # AvailabilityErrorDbError means availability can't be retrieved due to db error.
+  const :AvailabilityErrorDbError, 0
+  # AvailabilityErrorNoSuchItem means availability is not available since the
+  # item doesn't exist.
+  const :AvailabilityErrorNoSuchItem, 1
+
+  # PinState determines whether items should be available locally permanently or
+  # not. Transpiled from src/libsync/common/pinstate.h.
+  #
+  # Note: This enum intentionally mimics CF_PIN_STATE of Windows cfapi.
+  class PinState < uint8
+  end
+
+  # PinInherited means the pin state is derived from the state of the parent
+  # folder.
+  const :PinInherited, 0
+  # PinAlwaysLocal means the file shall be available and up to date locally.
+  const :PinAlwaysLocal, 1
+  # PinOnlineOnly means the file shall be a dehydrated placeholder, filled on
+  # demand.
+  const :PinOnlineOnly, 2
+  # PinUnspecified means the user hasn't made a decision.
+  const :PinUnspecified, 3
+  # PinExcluded is the special case for files that are excluded.
+  const :PinExcluded, 4
+
+  # VfsItemAvailability is a user-facing version of PinState.
+  #
+  # NOTE: The numerical values and ordering of this enum are relevant.
+  class VfsItemAvailability < uint8
+  end
+
+  # AvailabilityAlwaysLocal means the item and all its subitems are hydrated
+  # and pinned AlwaysLocal.
+  const :AvailabilityAlwaysLocal, 0
+  # AvailabilityAllHydrated means the item and all its subitems are hydrated.
+  const :AvailabilityAllHydrated, 1
+  # AvailabilityMixed means there are dehydrated and hydrated items.
+  const :AvailabilityMixed, 2
+  # AvailabilityAllDehydrated means there are only dehydrated items but the
+  # pin state isn't all OnlineOnly.
+  const :AvailabilityAllDehydrated, 3
+  # AvailabilityOnlineOnly means the item and all its subitems are dehydrated
+  # and OnlineOnly.
+  const :AvailabilityOnlineOnly, 4
+
+  # AvailabilityResult is Vfs::AvailabilityResult, a Result<VfsItemAvailability,
+  # AvailabilityError>.
+  var AvailabilityResult = Struct.new(
+    Availability: VfsItemAvailability,
+    Err: AvailabilityError,
+    HasErr: bool
+  )
+
+  def AvailabilityOf(a) # (VfsItemAvailability) -> AvailabilityResult
+    return AvailabilityResult.new(Availability: a)
+  end
+
+  def AvailabilityErrorOf(e) # (AvailabilityError) -> AvailabilityResult
+    return AvailabilityResult.new(Err: e, HasErr: true)
+  end
+
+  # ItemType is SyncFileItem::Type, as far as the vfs plugins read it.
+  class ItemType < uint8
+  end
+
+  const :ItemTypeFile, 0
+  const :ItemTypeFileMetadataOnly, 1
+  const :ItemTypeDirectory, 2
+  const :ItemTypeVirtualFile, 3
+  const :ItemTypeVirtualFileDehydration, 4
+  const :ItemTypeVirtualFileDownload, 5
+
+  # SyncFileItem carries the fields the vfs plugins read off an item.
+  var SyncFileItem = Struct.new(
+    LocalName: string,
+    FileID: Array[byte],
+    Modtime: int64,
+    Size: int64,
+    Type: ItemType,
+    Inode: uint64
+  )
+
+  # SyncFileStatusTag is SyncFileStatus::SyncFileStatusTag.
+  class SyncFileStatusTag < uint8
+  end
+
+  const :StatusNone, 0
+  const :StatusSync, 1
+  const :StatusWarning, 2
+  const :StatusUpToDate, 3
+  const :StatusError, 4
+  const :StatusExcluded, 5
+
+  # LocalInfo is the subset of OCC::LocalInfo statTypeVirtualFile() touches.
+  var LocalInfo = Struct.new(
+    Path: string,
+    Type: ItemType,
+    Valid: bool
+  )
+
+  # Account is the part of OCC::Account the cfapi plugin reads.
+  var Account = Interface.new do
+    def UUID # () -> string
+    end
+
+    def URL # () -> string
+    end
+  end
+
+  # Journal is the part of OCC::SyncJournalDb the plugins reach through
+  # VfsSetupParams.
+  var Journal = Interface.new do
+    def SetFileRecord(item) # (SyncFileItem) -> error
+    end
+  end
+
+  # SyncEngine is the part of OCC::SyncEngine the cfapi rename callback reads.
+  var SyncEngine = Interface.new do
+    def IsExcluded(path) # (string) -> bool
+    end
+  end
+
+  # SetupParams is VfsSetupParams: the collection of parameters for initializing
+  # a Vfs instance.
+  class SetupParams
+    # Account url, credentials etc for network calls
+    attr_accessor :Account, Account
+
+    # Journal gives access to the sync folder's database.
+    #
+    # Note: The journal must live at least until the Vfs.Stop() call.
+    attr_accessor :Journal, Journal
+
+    # Strings potentially passed on to the platform
+    attr_accessor :ProviderDisplayName, string
+    attr_accessor :ProviderName, string
+    attr_accessor :ProviderVersion, string
+    attr_accessor :SocketPath, string
+
+    attr_accessor :BaseURL, string
+    attr_accessor :SpaceID, string
+    attr_accessor :FolderDisplayNameValue, string
+
+    attr_accessor :SyncEngine, SyncEngine
+
+    # Root is the sync folder's local root.
+    attr_accessor :Root, string
+
+    def self.FolderDisplayName # () -> string
+      return self.FolderDisplayNameValue
+    end
+
+    # FilesystemPath is VfsSetupParams::filesystemPath().
+    def self.FilesystemPath # () -> string
+      return self.Root
+    end
+  end
+
+  # Vfs is the OCC::Vfs interface. The Qt signals become the Callbacks a plugin
+  # is started with.
+  var Vfs = Interface.new do
+    def Mode # () -> Mode
+    end
+
+    # Stop interaction with VFS provider. Like when the client application quits.
+    def Stop # ()
+    end
+
+    # UnregisterFolder deregisters the folder with the sync provider, like when
+    # a folder is removed.
+    def UnregisterFolder # ()
+    end
+
+    # SocketAPIPinStateActionsShown reports whether the socket api should show
+    # pin state options.
+    def SocketAPIPinStateActionsShown # () -> bool
+    end
+
+    # CreatePlaceholder creates a new dehydrated placeholder. Called from
+    # PropagateDownload.
+    def CreatePlaceholder(item) # (SyncFileItem) -> error
+    end
+
+    # NeedsMetadataUpdate is the discovery hook: even unchanged files may need
+    # UPDATE_METADATA.
+    def NeedsMetadataUpdate(item) # (SyncFileItem) -> bool
+    end
+
+    # IsDehydratedPlaceholder determines whether the file at the given absolute
+    # path is a dehydrated placeholder.
+    def IsDehydratedPlaceholder(filePath) # (string) -> bool
+    end
+
+    # StatTypeVirtualFile is similar to IsDehydratedPlaceholder but used from
+    # sync discovery. It shall set the type if appropriate.
+    def StatTypeVirtualFile(fileInfo) # (LocalInfo) -> LocalInfo
+    end
+
+    # SetPinState sets the pin state for the item at a path, and for all items
+    # below it. relFilePath is relative to the sync folder, "" for the root.
+    def SetPinState(relFilePath, state) # (string, PinState) -> bool
+    end
+
+    # PinState returns the pin state of an item at a path, or ok false on
+    # retrieval error.
+    def PinState(relFilePath) # (string) -> (PinState, bool)
+    end
+
+    # Availability returns the availability status of an item at a path.
+    def Availability(folderPath) # (string) -> AvailabilityResult
+    end
+
+    # FileStatusChanged updates in-sync state based on the
+    # SyncFileStatusTracker signal.
+    def FileStatusChanged(systemFileName, status) # (string, SyncFileStatusTag)
+    end
+  end
+
+  # Callbacks replaces the Qt signals Vfs emits.
+  class Callbacks
+    # Started signals that start completed.
+    # func()
+    attr_accessor :Started, Proc
+    # Error signals that we encountered an error.
+    # func(err string)
+    attr_accessor :Error, Proc
+    # NeedSync signals that the vfs plugin detected that the meta data are out
+    # of sync and requests a sync with the server.
+    # func()
+    attr_accessor :NeedSync, Proc
+  end
+end

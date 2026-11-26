@@ -29,7 +29,7 @@ func main() {
 
 	events := make(chan directory.Event, 256)
 
-	journal, err := journal.OpenJournal(filepath.Join(root, dbPath))
+	journal, err := journal.Open(filepath.Join(root, dbPath))
 	if err != nil {
 		log.Fatal(err)
 	}

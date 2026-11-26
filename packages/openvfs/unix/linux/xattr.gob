@@ -1,0 +1,30 @@
+#go:build linux
+
+require "golang.org/x/sys/unix"
+
+module Linux
+  # The Linux arm of Xattr::{get,set,list,remove}xattr: the l* variants, which do
+  # not follow a final symlink.
+
+  def xattrGet(path, name, value) # (string, string, []byte) -> (int, error)
+    return unix.Lgetxattr(path, name, value)
+  end
+
+  def xattrSet(path, name, value, flags) # (string, string, []byte, int) -> error
+    return unix.Lsetxattr(path, name, value, flags)
+  end
+
+  def xattrList(path, list) # (string, []byte) -> (int, error)
+    return unix.Llistxattr(path, list)
+  end
+
+  def xattrRemove(path, name) # (string, string) -> error
+    return unix.Lremovexattr(path, name)
+  end
+
+  # isErrNoAttr is the errno openVFSfuse_getxattr() compares against before it
+  # hands out the default placeholder data. Linux reports a missing attribute as ENODATA.
+  def isErrNoAttr(err) # (error) -> bool
+    return err == unix.ENODATA
+  end
+end

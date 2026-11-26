@@ -1,0 +1,93 @@
+#go:build linux || darwin
+
+require "golang.org/x/sys/unix"
+
+module Unix
+  # There is no portable l*xattrat(), so the file is opened relative to the root
+  # descriptor without following a final symlink and the f*xattr() calls are used
+  # on it. Neither Linux nor macOS lets a user namespace attribute live on a
+  # symlink, so nothing that can carry user.* is lost.
+
+  def openAt(dirfd, rel) # (int, string) -> (int, error)
+    fd, err = unix.Openat(dirfd, rel, unix.O_RDONLY | unix.O_NOFOLLOW | unix.O_CLOEXEC, 0)
+
+    if err == nil
+      return fd, nil
+    end
+
+    # A write-only file cannot be opened for reading, but its attributes are
+    # still reachable through a write-only descriptor.
+    if err == unix.EACCES
+      fd, werr = unix.Openat(dirfd, rel, unix.O_WRONLY | unix.O_NOFOLLOW | unix.O_CLOEXEC, 0)
+
+      if werr == nil
+        return fd, nil
+      end
+    end
+
+    return -1, err
+  end
+
+  def xattrGetAt(dirfd, rel, name, value) # (int, string, string, []byte) -> (int, error)
+    fd, err = openAt(dirfd, rel)
+    if err
+      return 0, err
+    end
+
+    defer unix.Close(fd)
+
+    return unix.Fgetxattr(fd, name, value)
+  end
+
+  def xattrSetAt(dirfd, rel, name, value, flags) # (int, string, string, []byte, int) -> error
+    fd, err = openAt(dirfd, rel)
+    if err
+      return err
+    end
+
+    defer unix.Close(fd)
+
+    return unix.Fsetxattr(fd, name, value, flags)
+  end
+
+  def xattrListAt(dirfd, rel, list) # (int, string, []byte) -> (int, error)
+    fd, err = openAt(dirfd, rel)
+    if err
+      return 0, err
+    end
+
+    defer unix.Close(fd)
+
+    return unix.Flistxattr(fd, list)
+  end
+
+  def xattrRemoveAt(dirfd, rel, name) # (int, string, string) -> error
+    fd, err = openAt(dirfd, rel)
+    if err
+      return err
+    end
+
+    defer unix.Close(fd)
+
+    return unix.Fremovexattr(fd, name)
+  end
+
+  # xattrGetAtString is xattrGetString against a root-relative path.
+  def xattrGetAtString(dirfd, rel, name) # (int, string, string) -> (string, bool)
+    size = 0
+
+    loop do
+      size = size + 255
+      value = make(Array[byte], size)
+      res, err = xattrGetAt(dirfd, rel, name, value)
+
+      if err == nil
+        return string(value[...res]), true
+      end
+
+      unless isErrRange(err)
+        return "", false
+      end
+    end
+  end
+end

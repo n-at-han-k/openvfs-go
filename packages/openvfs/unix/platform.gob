@@ -1,0 +1,119 @@
+#go:build linux || darwin
+
+require "errors"
+
+require "github.com/hanwen/go-fuse/v2/fuse", gofuse
+require "golang.org/x/sys/unix"
+
+module Unix
+  # Platform is the set of operations that differ between Linux and macOS.
+  #
+  # Upstream expresses these with #ifdef __APPLE__ inside one translation unit.
+  # Here the shared layer is one package and each OS is its own, so the OS
+  # package fills this table at init and the shared code calls through it. The
+  # call sites are unchanged from the straight translation -- the names below are
+  # the same functions the C++ calls, they are just variables now.
+  class Platform
+    # Xattr*, the l*xattr family: no following of a final symlink.
+    # func(path, name string, value []byte) (int, error)
+    attr_accessor :XattrGet, Proc
+    # func(path, name string, value []byte, flags int) error
+    attr_accessor :XattrSet, Proc
+    # func(path string, list []byte) (int, error)
+    attr_accessor :XattrList, Proc
+    # func(path, name string) error
+    attr_accessor :XattrRemove, Proc
+
+    # IsErrNoAttr reports a missing attribute: ENODATA on Linux, ENOATTR on
+    # macOS.
+    # func(err error) bool
+    attr_accessor :IsErrNoAttr, Proc
+
+    # CallerName is getcallername(): /proc/<pid>/exe on Linux, KERN_PROCARGS2
+    # on macOS.
+    # func(pid uint32) string
+    attr_accessor :CallerName, Proc
+    # CallerIsThreadOfProcess answers the /proc/<pid>/task/<tid> question,
+    # which upstream short circuits to false under __APPLE__.
+    # func(callerThreadID uint32, processID int64) bool
+    attr_accessor :CallerIsThreadOfProcess, Proc
+
+    # StatMode widens st_mode, which is 32 bit on Linux and 16 bit on macOS.
+    # func(st *unix.Stat_t) uint32
+    attr_accessor :StatMode, Proc
+    # FillStatfs maps struct statfs onto the fuse reply; macOS carries neither
+    # f_namemax nor f_frsize.
+    # func(out *gofuse.StatfsOut, st *unix.Statfs_t)
+    attr_accessor :FillStatfs, Proc
+    # MknodAt and MkfifoAt stand in for the syscalls macOS does not have.
+    # func(dirfd int, rel string, mode uint32, dev uint32) error
+    attr_accessor :MknodAt, Proc
+    # func(dirfd int, rel string, mode uint32) error
+    attr_accessor :MkfifoAt, Proc
+
+    # LogToSyslog mirrors a log line into syslog, which upstream does on
+    # everything but Apple.
+    # func(message string)
+    attr_accessor :LogToSyslog, Proc
+  end
+
+  # The shared layer calls these under the names the C++ uses.
+
+  # func(path, name string, value []byte) (int, error)
+  var :xattrGet, Proc
+  # func(path, name string, value []byte, flags int) error
+  var :xattrSet, Proc
+  # func(path string, list []byte) (int, error)
+  var :xattrList, Proc
+  # func(path, name string) error
+  var :xattrRemove, Proc
+
+  # func(err error) bool
+  var :isErrNoAttr, Proc
+
+  # func(pid uint32) string
+  var :getcallernameByPid, Proc
+  # func(callerThreadID uint32, processID int64) bool
+  var :callerIsThreadOfProcess, Proc
+
+  # func(st *unix.Stat_t) uint32
+  var :statMode, Proc
+  # func(out *gofuse.StatfsOut, st *unix.Statfs_t)
+  var :fillStatfs, Proc
+  # func(dirfd int, rel string, mode uint32, dev uint32) error
+  var :mknodAt, Proc
+  # func(dirfd int, rel string, mode uint32) error
+  var :mkfifoAt, Proc
+
+  # func(message string)
+  var :logToSyslog, Proc
+
+  # platformInstalled reports whether SetPlatform has run. Every entry point
+  # checks it, so importing this package without its OS half fails with a clear
+  # error rather than a nil call deep inside a fuse callback.
+  def platformInstalled # () -> bool
+    return xattrGet != nil
+  end
+
+  # errNoPlatform is returned by the entry points when the OS half is missing.
+  var errNoPlatform = errors.New(
+    "openvfs: no platform installed; import example.com/project/packages/unix/linux or .../darwin")
+
+  # SetPlatform installs the OS specific half of the backend. The linux and
+  # darwin packages call it from init(), so importing one of them is what makes
+  # this package usable.
+  def SetPlatform(p) # (Platform)
+    xattrGet = p.XattrGet
+    xattrSet = p.XattrSet
+    xattrList = p.XattrList
+    xattrRemove = p.XattrRemove
+    isErrNoAttr = p.IsErrNoAttr
+    getcallernameByPid = p.CallerName
+    callerIsThreadOfProcess = p.CallerIsThreadOfProcess
+    statMode = p.StatMode
+    fillStatfs = p.FillStatfs
+    mknodAt = p.MknodAt
+    mkfifoAt = p.MkfifoAt
+    logToSyslog = p.LogToSyslog
+  end
+end

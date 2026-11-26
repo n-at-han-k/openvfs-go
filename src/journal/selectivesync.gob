@@ -1,0 +1,10 @@
+module Journal
+  CREATE_SELECTIVE_SYNC_TABLE = `CREATE TABLE IF NOT EXISTS selectivesync (
+path VARCHAR(4096),
+type INTEGER
+);`
+
+  SET_SELECTIVE_SYNC_QUERY = `INSERT INTO selectivesync VALUES (?1, ?2)`
+
+  GET_SELECTIVE_SYNC_QUERY = `SELECT path FROM selectivesync WHERE type=?1`
+end
