@@ -319,6 +319,7 @@ module Remote
       mountpoint: mountpoint,
       journal: journal,
       client: client,
+      mu: @sync.Mutex.new(),
       jobs: make(Hash[int, @@DownloadJob])
     )
   end

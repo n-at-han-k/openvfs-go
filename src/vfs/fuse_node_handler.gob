@@ -48,7 +48,7 @@ module Vfs
 
         errno = self.FuseMount.raise(ctx, MountEvent.new(
           Kind:   Hydrate,
-          Path:   p,
+          Path:   filepath.Join(self.FuseMount.Mountpoint, self.Path(nil)),
           FileID: attr.FileID,
           Caller: NewFuseClient(c),
           Reply:  make(Chan[bool], 1)

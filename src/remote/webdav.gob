@@ -6,6 +6,7 @@ require "net/http"
 require "strings"
 
 require "github.com/migadu/go-webdav"
+require "github.com/rs/zerolog/log"
 
 module Remote
   # Client wraps a WebDAV client for listing remote directories.
@@ -40,6 +41,8 @@ module Remote
       if err
         return nil, err
       end
+
+      log.Debug().Str("url", url).Int("status", res.StatusCode).Str("range", req.Header.Get("Range")).Msg("webdav get")
 
       if res.StatusCode != http.StatusOK && res.StatusCode != http.StatusPartialContent
         res.Body.Close()
