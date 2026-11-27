@@ -7,7 +7,6 @@ require "encoding/hex"
 require "hash"
 require "hash/adler32"
 require "io"
-require "log"
 require "os"
 require "path/filepath"
 require "runtime"
@@ -15,6 +14,7 @@ require "strconv"
 require "strings"
 
 require "example.com/project/src/journal"
+require "github.com/rs/zerolog/log"
 
 module Directory
   var SyncRequest = Struct.new(Cause: Event)
@@ -87,7 +87,7 @@ module Directory
       })
 
       if err
-        log.Printf("sync (%v): local discovery failed: %v", req.Cause.Kind, err)
+        log.Warn().Err(err).Msgf("sync (%v): local discovery failed", req.Cause.Kind)
         return
       end
 
@@ -233,7 +233,7 @@ module Directory
         item.SetInstruction(InstructionError)
         self.childIgnored = true
         item.ErrorString = serverEntry.Error()
-        log.Printf("discovery: %s", item.ErrorString)
+        log.Info().Msgf("discovery: %s", item.ErrorString)
         self.emitItemDiscovered(item)
         return
       end
@@ -270,7 +270,7 @@ module Directory
 
           if serverEntry.IsDirectory()
             unless dbEntry.IsDirectory()
-              log.Printf("discovery: %s: server says directory, db does not", path.Original)
+              log.Info().Msgf("discovery: %s: server says directory, db does not", path.Original)
             end
 
             item.SetInstruction(InstructionUpdateMetadata)
@@ -352,14 +352,14 @@ module Directory
         # checks are not repeated in reconcile, we can't just skip the
         # candidate but have to give up completely.
         if base.IsDirectory() != item.IsDirectory()
-          log.Printf("discovery: file types different, not a rename")
+          log.Info().Msgf("discovery: file types different, not a rename")
           done = true
           next
         end
 
         if !serverEntry.IsDirectory() && base.Etag != serverEntry.Etag()
           # File with different etag: don't rename, download it again.
-          log.Printf("discovery: file etag different, not a rename")
+          log.Info().Msgf("discovery: file etag different, not a rename")
           done = true
           next
         end
@@ -368,7 +368,7 @@ module Directory
         originalPath = base.Path
 
         if self.isRenamed(originalPath)
-          log.Printf("discovery: folder already has a rename entry, skipping")
+          log.Info().Msgf("discovery: folder already has a rename entry, skipping")
           next
         end
 
@@ -379,7 +379,7 @@ module Directory
           info = NewLocalInfo(abs)
 
           unless info.IsValid()
-            log.Printf("discovery: local file does not exist anymore: %s", originalPathAdjusted)
+            log.Info().Msgf("discovery: local file does not exist anymore: %s", originalPathAdjusted)
             next
           end
 
@@ -387,14 +387,14 @@ module Directory
           # a suffix file's size differs from the db size. That's ok, they
           # will DELETE+NEW.
           if info.ModTime() != base.ModTime || info.Size() != base.FileSize || info.IsDirectory()
-            log.Printf("discovery: the file has changed locally, not a rename: %s", originalPath)
+            log.Info().Msgf("discovery: the file has changed locally, not a rename: %s", originalPath)
             next
           end
         else
           info = NewLocalInfo(abs)
 
           if !info.IsValid() || !info.IsDirectory()
-            log.Printf("discovery: local directory does not exist anymore: %s", originalPathAdjusted)
+            log.Info().Msgf("discovery: local directory does not exist anymore: %s", originalPathAdjusted)
             next
           end
         end
@@ -418,7 +418,7 @@ module Directory
           item.OriginalFile = originalPath
           path.Original = originalPath
           path.Local = adjustedOriginalPath
-          log.Printf("discovery: rename detected (down) %s -> %s", item.LocalName(), item.RenameTarget)
+          log.Info().Msgf("discovery: rename detected (down) %s -> %s", item.LocalName(), item.RenameTarget)
         }
 
         if wasDeletedOnServer
@@ -431,7 +431,7 @@ module Directory
           # HTTP client there is no way to ask, so fall back to NEW, which
           # is the safe answer (it costs a re-download, never data).
           # TODO: port the RequestEtagJob branch once the remote query lands.
-          log.Printf("discovery: cannot confirm remote rename of %s without a server query, treating as new", originalPath)
+          log.Info().Msgf("discovery: cannot confirm remote rename of %s without a server query, treating as new", originalPath)
           done = true
         end
       end
@@ -522,7 +522,7 @@ module Directory
           end
         elsif noServerEntry
           # Not locally, not on the server. The entry is stale!
-          log.Printf("discovery: stale DB entry: %s", path.Original)
+          log.Info().Msgf("discovery: stale DB entry: %s", path.Original)
 
           if (err = self.journal.DeleteRecord(path.Original))
             self.dbError(err)
@@ -612,7 +612,7 @@ module Directory
 
             if computeLocalChecksum(dbEntry.ChecksumHeader, abs, item) &&
               item.ChecksumHeader == dbEntry.ChecksumHeader
-              log.Printf("discovery: NOTE: checksums are identical, file did not actually change: %s", path.Local)
+              log.Info().Msgf("discovery: NOTE: checksums are identical, file did not actually change: %s", path.Local)
               item.SetInstruction(InstructionUpdateMetadata)
             end
           end
@@ -627,7 +627,7 @@ module Directory
         # Somehow there is a missing DB entry while the virtual file already
         # exists. The instruction should already be set correctly.
         if item.Instruction() != InstructionUpdateMetadata
-          log.Printf("discovery: %s: virtual file without db entry has instruction %v", path.Original, item.Instruction())
+          log.Info().Msgf("discovery: %s: virtual file without db entry has instruction %v", path.Original, item.Instruction())
         end
 
         finalize(path, recurseQueryServer)
@@ -663,11 +663,11 @@ module Directory
         abs = filepath.Join(self.localDir, filepath.FromSlash(path.Local))
 
         if self.vfsIsDehydratedPlaceholder(abs)
-          log.Printf("discovery: wiping virtual file without db entry for %s", path.Local)
+          log.Info().Msgf("discovery: wiping virtual file without db entry for %s", path.Local)
           item.SetInstruction(InstructionRemove)
           item.Direction = DirectionDown
         else
-          log.Printf("discovery: virtual file without db entry for %s but looks odd, keeping", path.Local)
+          log.Info().Msgf("discovery: virtual file without db entry for %s but looks odd, keeping", path.Local)
           item.SetInstruction(InstructionIgnore)
         end
       }
@@ -684,19 +684,19 @@ module Directory
       # Gradually check the conditions for accepting a move candidate.
       moveCheck = lambda { || # () -> bool
         unless base.IsValid()
-          log.Printf("discovery: not a move, no item in db with inode %d", localEntry.Inode())
+          log.Info().Msgf("discovery: not a move, no item in db with inode %d", localEntry.Inode())
           return false
         end
 
         if base.IsDirectory() != item.IsDirectory()
-          log.Printf("discovery: not a move, types don't match: %v %v %v", base.Type, item.Type, localEntry.Type())
+          log.Info().Msgf("discovery: not a move, types don't match: %v %v %v", base.Type, item.Type, localEntry.Type())
           return false
         end
 
         # Directories and virtual files don't need size/mtime equality.
         if !localEntry.IsDirectory() && !base.IsVirtualFile() &&
           (base.ModTime != localEntry.ModTime() || base.FileSize != localEntry.Size())
-          log.Printf("discovery: not a move, mtime or size differs, modtime: %d %d, size: %d %d",
+          log.Info().Msgf("discovery: not a move, mtime or size differs, modtime: %d %d, size: %d %d",
             base.ModTime, localEntry.ModTime(), base.FileSize, localEntry.Size())
           return false
         end
@@ -710,7 +710,7 @@ module Directory
         caseOnlyRename = fsCasePreserving() && strings.EqualFold(originalPath, path.Local) && originalPath != path.Local
 
         if statErr == nil && !caseOnlyRename
-          log.Printf("discovery: not a move, base file still exists at %s", originalPath)
+          log.Info().Msgf("discovery: not a move, base file still exists at %s", originalPath)
           return false
         end
 
@@ -719,18 +719,18 @@ module Directory
           abs = filepath.Join(self.localDir, filepath.FromSlash(path.Original))
 
           if computeLocalChecksum(base.ChecksumHeader, abs, item)
-            log.Printf("discovery: checking checksum of potential rename %s %s %s",
+            log.Info().Msgf("discovery: checking checksum of potential rename %s %s %s",
               path.Original, item.ChecksumHeader, base.ChecksumHeader)
 
             if item.ChecksumHeader != base.ChecksumHeader
-              log.Printf("discovery: not a move, checksums differ")
+              log.Info().Msgf("discovery: not a move, checksums differ")
               return false
             end
           end
         end
 
         if self.isRenamed(originalPath)
-          log.Printf("discovery: not a move, base path already renamed")
+          log.Info().Msgf("discovery: not a move, base path already renamed")
           return false
         end
 
@@ -777,7 +777,7 @@ module Directory
           item.Type = journal.ItemTypeFile
         end
 
-        log.Printf("discovery: rename detected (up) %s -> %s", item.LocalName(), item.RenameTarget)
+        log.Info().Msgf("discovery: rename detected (up) %s -> %s", item.LocalName(), item.RenameTarget)
 
         return path
       }
@@ -798,7 +798,7 @@ module Directory
       # a local-NEW. Without an HTTP client, take the local-NEW branch, which is
       # the answer upstream uses when the query says "still there".
       # TODO: port the RequestEtagJob branch once the remote query lands.
-      log.Printf("discovery: cannot confirm local rename of %s without a server query, treating as new", originalPath)
+      log.Info().Msgf("discovery: cannot confirm local rename of %s without a server query, treating as new", originalPath)
       postProcessLocalNew(path)
       finalize(path, recurseQueryServer)
     end
@@ -827,7 +827,7 @@ module Directory
         isConflict = sizeDiffers || modTimeDiffers
 
         if isConflict
-          log.Printf("discovery: %s: detected conflict: size difference: %t mtime difference: %t",
+          log.Info().Msgf("discovery: %s: detected conflict: size difference: %t mtime difference: %t",
             serverEntry.Name(), sizeDiffers, modTimeDiffers)
         end
 
@@ -896,7 +896,7 @@ module Directory
         # TODO: upstream takes the direction from the parent _dirItem.
       end
 
-      log.Printf("discovery: discovered %s %v %v %v",
+      log.Info().Msgf("discovery: discovered %s %v %v %v",
         item.LocalName(), item.Instruction(), item.Direction, item.Type)
 
       if item.IsDirectory() && item.Instruction() == InstructionSync
@@ -929,7 +929,7 @@ module Directory
 
     # dbError is ProcessDirectoryJob::dbError().
     def dbError(err) # (error)
-      log.Printf("discovery: error while reading the database: %v", err)
+      log.Warn().Err(err).Msg("discovery: error while reading the database")
     end
 
     def vfsNeedsMetadataUpdate(item) # (*SyncFileItem) -> bool
@@ -1277,7 +1277,7 @@ module Directory
   def checksumFile(path, algo) # (string, journal.ChecksumAlgorithm) -> string
     f, err = os.Open(path)
     if err
-      log.Printf("checksums: could not open file %s for reading and computing checksum: %v", path, err)
+      log.Warn().Err(err).Msgf("checksums: could not open file %s for reading and computing checksum", path)
       return ""
     end
 
@@ -1305,7 +1305,7 @@ module Directory
     when journal.ChecksumMD5
       h = md5.New()
     else
-      log.Printf("checksums: failed to compute checksum: unsupported algorithm %v", algo)
+      log.Warn().Msgf("checksums: failed to compute checksum: unsupported algorithm %v", algo)
       return ""
     end
 

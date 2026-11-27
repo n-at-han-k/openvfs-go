@@ -1,10 +1,10 @@
-require "log"
 require "os"
 require "path/filepath"
 require "sort"
 require "strings"
 
 require "example.com/project/src/journal"
+require "github.com/rs/zerolog/log"
 
 module Directory
   class Scanner
@@ -107,7 +107,7 @@ module Directory
 
         if self.handleExcluded(path.Target, isHidden)
           if !e.localEntry.IsValid() && e.dbEntry.IsValid()
-            log.Printf("discovery: removing db entry for non existing ignored file: %s", path.Original)
+            log.Info().Msgf("discovery: removing db entry for non existing ignored file: %s", path.Original)
 
             if (err = self.journal.DeleteRecord(path.Original))
               return err

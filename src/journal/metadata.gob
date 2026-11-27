@@ -232,7 +232,7 @@ VALUES (?1 , ?2, ?3 , ?4 , ?5 , ?6 , ?7,  ?8 , ?9 , ?10, ?11, ?12, ?13);`
         return fmt.Errorf("record %q: remotePerm is null", self.Path)
       elsif self.Inode == 0
         return fmt.Errorf("record %q: inode is 0", self.Path)
-      elsif !self.HasModTime
+      elsif self.HasModTime == false
         return fmt.Errorf("record %q: no modtime", self.Path)
       elsif self.FileID == ""
         return fmt.Errorf("record %q: fileId is empty", self.Path)

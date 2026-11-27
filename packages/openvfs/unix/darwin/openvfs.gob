@@ -9,11 +9,11 @@
 # openvfs package dispatches to.
 
 require "context"
-require "log"
 require "os"
 
 require "example.com/project/packages/openvfs/unix"
 require "example.com/project/src/directory"
+require "github.com/rs/zerolog/log"
 
 module Darwin
   def init # ()
@@ -39,8 +39,14 @@ module Darwin
   end
 
   # ServeAPI serves the socket API the filesystem talks to.
-  def ServeAPI(ctx, socketPath, onChange) # context.Context, string, func(directory.Event)
-    report(unix.ServeAPI(ctx, socketPath, drain("openvfs socket api")))
+  def ServeAPI(ctx, socketPath, onChange) # (context.Context, string, func(directory.Event)) -> error
+    ready = make(Chan[error], 1)
+    err = unix.ServeAPI(ctx, socketPath, ready)
+    if err
+      return err
+    end
+
+    return ready.<<
   end
 
   # Main is the openvfsfuse daemon's entry point.
@@ -72,7 +78,7 @@ module Darwin
       err = ready.<<
 
       if err
-        log.Printf("%s: %v", what, err)
+        log.Warn().Err(err).Msgf("%s", what)
       end
     }.()
 
@@ -81,7 +87,7 @@ module Darwin
 
   def report(err) # (error)
     if err
-      log.Printf("openvfs: %v", err)
+      log.Warn().Err(err).Msg("openvfs")
     end
   end
 end

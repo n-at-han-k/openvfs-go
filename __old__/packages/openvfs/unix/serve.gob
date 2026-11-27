@@ -1,0 +1,83 @@
+require "bufio"
+require "context"
+require "encoding/json"
+require "fmt"
+require "net"
+require "os"
+require "strings"
+
+module Unix
+  # ServeAPI is the standalone process' side of the socket API. In the desktop
+  # client this role is played by the client itself.
+
+  var apiMessage = Struct.new(
+    # `json:"id"`
+    ID: string,
+    # `json:"arguments"`
+    Arguments: Hash[string, any]
+  )
+
+  def ServeAPI(ctx, socketPath, ready) # (context.Context, string, chan<- error) -> error
+    _ = os.Remove(socketPath)
+
+    listener, err = net.Listen("unix", socketPath)
+    if err
+      if ready != nil
+        ready << err
+      end
+
+      return err
+    end
+
+    if ready != nil
+      ready << nil
+    end
+
+    go lambda {
+      ctx.Done().<<
+      _ = listener.Close()
+    }.()
+
+    go lambda {
+      loop do
+        conn, err = listener.Accept()
+        if err
+          return
+        end
+
+        go lambda {
+          serveAPIConn(conn)
+        }.()
+      end
+    }.()
+
+    return nil
+  end
+
+  def serveAPIConn(conn) # (net.Conn)
+    defer conn.Close()
+
+    scanner = bufio.NewScanner(conn)
+
+    while scanner.Scan()
+      kind, payload, ok = strings.Cut(scanner.Text(), ":")
+
+      unless ok
+        next
+      end
+
+      case kind
+      when "VERSION"
+        _, _ = fmt.Fprintf(conn, "VERSION:0.1:1:%d\n", os.Getpid())
+      when "V2/HYDRATE_FILE"
+        var :msg, apiMessage
+
+        if (err = json.Unmarshal(Array[byte].(payload), @msg))
+          next
+        end
+
+        _, _ = fmt.Fprintf(conn, "V2/HYDRATE_FILE_RESULT:{\"id\":%q,\"arguments\":{\"status\":\"ERROR\"}}\n", msg.ID)
+      end
+    end
+  end
+end

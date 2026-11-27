@@ -1,0 +1,166 @@
+require "strconv"
+require "strings"
+require "time"
+
+require "example.com/project/src/journal"
+
+module Directory
+  class RemoteFileData
+    attr_accessor :name, string
+    attr_accessor :etag, string
+    attr_accessor :fileID, string
+    attr_accessor :checksumHeader, string
+    attr_accessor :remotePerm, journal.RemotePermissions
+    attr_accessor :modtime, int64
+    attr_accessor :size, int64
+    attr_accessor :isDirectory, bool
+    attr_accessor :vaultIntegrityID, string
+
+    attr_accessor :err, string
+
+    protected def Name # () -> string
+      return self.name
+    end
+
+    protected def IsDirectory # () -> bool
+      return self.isDirectory
+    end
+
+    protected def Etag # () -> string
+      return self.etag
+    end
+
+    protected def FileID # () -> string
+      return self.fileID
+    end
+
+    protected def ChecksumHeader # () -> string
+      return self.checksumHeader
+    end
+
+    protected def RemotePerm # () -> journal.RemotePermissions
+      return self.remotePerm
+    end
+
+    protected def ModTime # () -> int64
+      return self.modtime
+    end
+
+    protected def Size # () -> int64
+      return self.size
+    end
+
+    protected def Error # () -> string
+      return self.err
+    end
+
+    protected def IsVaultFile # () -> bool
+      return self.vaultIntegrityID != ""
+    end
+
+    protected def IsValid # () -> bool
+      return self.name != ""
+    end
+  end
+
+  RFC1123_PATTERN = "Mon, 02 Jan 2006 15:04:05 GMT"
+
+  def ParseRFC1123Date(date) # (string) -> (time.Time, error)
+    if date == ""
+      return time.Time.new(), nil
+    end
+
+    return time.Parse(RFC1123_PATTERN, date)
+  end
+
+  def NormalizeEtag(etag) # (string) -> string
+    if etag == ""
+      return ""
+    end
+
+    unQuote = lambda {
+      if strings.HasPrefix(etag, `"`) && strings.HasSuffix(etag, `"`)
+        etag = strings.TrimSuffix(strings.TrimPrefix(etag, `"`), `"`)
+      end
+    }
+
+    etag = strings.TrimPrefix(etag, "W/")
+    unQuote()
+    etag = strings.TrimSuffix(etag, "-gzip")
+    unQuote()
+
+    return etag
+  end
+
+  def NewRemoteFileData(fileName, props) # (string, map[string]string) -> RemoteFileData
+    var :out, RemoteFileData
+    var :errors, Array[string]
+
+    out.name = fileName[strings.LastIndex(fileName, "/") + 1...]
+
+    if (v, ok = props["resourcetype"])
+      out.isDirectory = strings.Contains(v, "collection")
+    end
+
+    if (v, ok = props["getlastmodified"])
+      date, err = ParseRFC1123Date(v)
+
+      if err == nil
+        out.modtime = date.Unix()
+      end
+    end
+
+    if out.isDirectory
+      out.size = 0
+    else
+      if (v, ok = props["getcontentlength"])
+        n, _ = strconv.ParseInt(v, 10, 64)
+        out.size = max(0, n)
+      else
+        errors = append(errors, "size")
+      end
+    end
+
+    if (v, ok = props["getetag"])
+      out.etag = NormalizeEtag(v)
+    end
+
+    if (v, ok = props["id"])
+      out.fileID = v
+    end
+
+    if (v, ok = props["checksums"])
+      out.checksumHeader = journal.FindBestChecksum(v)
+    end
+
+    if (v, ok = props["permissions"])
+      out.remotePerm = journal.RemotePermissionsFromServerString(v)
+    end
+
+    if (v, ok = props["integrity-id"])
+      out.vaultIntegrityID = v
+    end
+
+    if out.etag == ""
+      errors = append(errors, "etag")
+    end
+
+    if out.fileID == ""
+      errors = append(errors, "id")
+    end
+
+    if out.size != 0 && out.checksumHeader == ""
+      errors = append(errors, "checksum")
+    end
+
+    if out.remotePerm.IsNull()
+      errors = append(errors, "permissions")
+    end
+
+    if len(errors) > 0
+      out.err = "server reported no " + strings.Join(errors, ", ")
+    end
+
+    return out
+  end
+end

@@ -1,0 +1,42 @@
+#go:build linux
+
+require "golang.org/x/sys/unix"
+
+require "example.com/project/src/journal"
+
+module Directory
+  var localStat = Struct.new(
+    inode: uint64,
+    size: int64,
+    modtime: int64,
+    typ: journal.ItemType,
+    isHidden: bool
+  )
+
+  def statLocalInfo(path) # (string) -> (localStat, error)
+    var :sb, unix.Stat_t
+
+    if (err = unix.Lstat(path, @sb))
+      return localStat.new(), err
+    end
+
+    out = localStat.new(
+      inode: uint64(sb.Ino),
+      size: sb.Size,
+      modtime: sb.Mtim.Sec
+    )
+
+    case sb.Mode & unix.S_IFMT
+    when unix.S_IFLNK
+      out.typ = journal.ItemTypeSymLink
+    when unix.S_IFDIR
+      out.typ = journal.ItemTypeDirectory
+    when unix.S_IFREG
+      out.typ = journal.ItemTypeFile
+    else
+      out.typ = journal.ItemTypeUnsupported
+    end
+
+    return out, nil
+  end
+end

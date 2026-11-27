@@ -18,7 +18,17 @@ task default: [:build]
 
 desc "build"
 task :build do
-  sh "#{GOB} run src/main.gob"
+  FileUtils.rm_rf(BUILD_DIR)
+  FileUtils.mkdir_p(BUILD_DIR)
+  sh "#{GOB} transpile src -o ./#{BUILD_DIR}/src"
+  sh "#{GOB} transpile packages -o ./#{BUILD_DIR}/packages"
+  FileUtils.cp("go.mod", "#{BUILD_DIR}/go.mod")
+  FileUtils.cp("go.sum", "#{BUILD_DIR}/go.sum")
+  FileUtils.mkdir_p("#{BUILD_DIR}/packages/openvfs/unix")
+  FileUtils.cp("packages/openvfs/unix/config.json", "#{BUILD_DIR}/packages/openvfs/unix/config.json")
+  cd BUILD_DIR do
+    sh "go run ./src/main.go --root ../tmp"
+  end
 end
 
 desc "Transpile every .gob source into #{BUILD_DIR}/"

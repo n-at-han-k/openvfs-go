@@ -1,3 +1,6 @@
 project
 refs/
 build/
+
+/tmp/*
+!/tmp/.keep

@@ -1,0 +1,437 @@
+require "database/sql"
+require "database/sql/driver"
+require "fmt"
+require "strings"
+require "time"
+
+require "modernc.org/sqlite", sqlite
+
+module Journal
+  CREATE_METADATA_TABLE = `CREATE TABLE IF NOT EXISTS metadata(
+phash INTEGER(8),
+path VARCHAR(4096),
+inode INTEGER,
+modtime INTEGER(8),
+type INTEGER,
+md5 VARCHAR(32),
+PRIMARY KEY(phash)
+);`
+
+  var metadataColumns = Array[columnPatch].new(
+    columnPatch.new("fileid", "ALTER TABLE metadata ADD COLUMN fileid VARCHAR(128);"),
+    columnPatch.new("remotePerm", "ALTER TABLE metadata ADD COLUMN remotePerm VARCHAR(128);"),
+    columnPatch.new("filesize", "ALTER TABLE metadata ADD COLUMN filesize BIGINT;"),
+    columnPatch.new("ignoredChildrenRemote", "ALTER TABLE metadata ADD COLUMN ignoredChildrenRemote INT;"),
+    columnPatch.new("contentChecksum", "ALTER TABLE metadata ADD COLUMN contentChecksum TEXT;"),
+    columnPatch.new("contentChecksumTypeId", "ALTER TABLE metadata ADD COLUMN contentChecksumTypeId INTEGER;"),
+    columnPatch.new("hasDirtyPlaceholder", "ALTER TABLE metadata ADD COLUMN hasDirtyPlaceholder BOOLEAN;")
+  )
+
+  var metadataIndexes = Array[string].new(
+    "CREATE INDEX IF NOT EXISTS metadata_inode ON metadata(inode);",
+    "CREATE INDEX IF NOT EXISTS metadata_path ON metadata(path);",
+    "CREATE INDEX IF NOT EXISTS metadata_parent ON metadata(parent_hash(path));"
+  )
+
+  SELECT_FILE_RECORD = `SELECT path, inode, modtime, type, md5, fileid, remotePerm, filesize,
+ ignoredChildrenRemote, contentchecksumtype.name || ':' || contentChecksum,
+ hasDirtyPlaceholder
+ FROM metadata
+ LEFT JOIN checksumtype as contentchecksumtype ON metadata.contentChecksumTypeId == contentchecksumtype.id `
+
+  SET_FILE_RECORD_QUERY = `INSERT OR REPLACE INTO metadata
+(phash, path, inode, modtime, type, md5, fileid, remotePerm, filesize, ignoredChildrenRemote,
+contentChecksum, contentChecksumTypeId, hasDirtyPlaceholder)
+VALUES (?1 , ?2, ?3 , ?4 , ?5 , ?6 , ?7,  ?8 , ?9 , ?10, ?11, ?12, ?13);`
+
+  DELETE_FILE_RECORD_QUERY = `DELETE FROM metadata WHERE phash=?1`
+
+  GET_FILE_RECORD_QUERY = SELECT_FILE_RECORD + `WHERE phash=?1`
+
+  GET_FILE_RECORD_BY_INODE = SELECT_FILE_RECORD + `WHERE inode=?1`
+
+  GET_FILE_RECORDS_BY_FILE_ID = SELECT_FILE_RECORD + `WHERE fileid=?1`
+
+  LIST_FILES_IN_PATH_QUERY = SELECT_FILE_RECORD + `WHERE parent_hash(path) = ?1 ORDER BY path||'/' ASC`
+
+  GET_ALL_FILES_QUERY = SELECT_FILE_RECORD + `ORDER BY path||'/' ASC`
+
+  GET_DIRTY_PLACEHOLDERS = SELECT_FILE_RECORD + `WHERE hasDirtyPlaceholder=TRUE`
+
+  # C++ registers parent_hash as a deterministic SQLite function, see
+  # syncjournaldb.cpp:286-295:
+  #
+  #	const char *end = std::strrchr(text, '/');
+  #	if (!end) end = text;
+  #	c_jhash64(text, end - text, 0);
+  #
+  # A path with no slash hashes the *empty* string, not itself: a root-level
+  # file's parent is the sync root. Hashing the whole path instead makes every
+  # root-level row invisible to listFilesInPath("").
+  def init # ()
+    _ = sqlite.RegisterDeterministicScalarFunction("parent_hash", 1, lambda { |_, args| # (*sqlite.FunctionContext, []driver.Value) -> (driver.Value, error)
+      path, ok = args[0].(string)
+
+      unless ok
+        return int64(0), nil
+      end
+
+      finish = 0
+      i = strings.LastIndex(path, "/")
+
+      if i >= 0
+        finish = i
+      end
+
+      return int64(PHash(path[...finish])), nil
+    })
+  end
+
+  def cMix64(a, b, c) # (uint64, uint64, uint64) -> (uint64, uint64, uint64)
+    a = a - b
+    a = a - c
+    a = a ^ c >> 43
+    b = b - c
+    b = b - a
+    b = b ^ a << 9
+    c = c - a
+    c = c - b
+    c = c ^ b >> 8
+    a = a - b
+    a = a - c
+    a = a ^ c >> 38
+    b = b - c
+    b = b - a
+    b = b ^ a << 23
+    c = c - a
+    c = c - b
+    c = c ^ b >> 5
+    a = a - b
+    a = a - c
+    a = a ^ c >> 35
+    b = b - c
+    b = b - a
+    b = b ^ a << 49
+    c = c - a
+    c = c - b
+    c = c ^ b >> 11
+    a = a - b
+    a = a - c
+    a = a ^ c >> 12
+    b = b - c
+    b = b - a
+    b = b ^ a << 18
+    c = c - a
+    c = c - b
+    c = c ^ b >> 22
+
+    return a, b, c
+  end
+
+  def cJHash64(k, intval) # ([]byte, uint64) -> uint64
+    length = uint64(len(k))
+
+    a, b = intval, intval
+    c = uint64(0x9e3779b97f4a7c13)
+
+    while len(k) >= 24
+      a = a + (uint64(k[0]) | uint64(k[1]) << 8 | uint64(k[2]) << 16 | uint64(k[3]) << 24 |
+        uint64(k[4]) << 32 | uint64(k[5]) << 40 | uint64(k[6]) << 48 | uint64(k[7]) << 56)
+      b = b + (uint64(k[8]) | uint64(k[9]) << 8 | uint64(k[10]) << 16 | uint64(k[11]) << 24 |
+        uint64(k[12]) << 32 | uint64(k[13]) << 40 | uint64(k[14]) << 48 | uint64(k[15]) << 56)
+      c = c + (uint64(k[16]) | uint64(k[17]) << 8 | uint64(k[18]) << 16 | uint64(k[19]) << 24 |
+        uint64(k[20]) << 32 | uint64(k[21]) << 40 | uint64(k[22]) << 48 | uint64(k[23]) << 56)
+      a, b, c = cMix64(a, b, c)
+      k = k[24...]
+    end
+
+    c = c + length
+    n = len(k)
+    i = 16
+
+    while i < n
+      c = c + (uint64(k[i]) << (8 * uint(i - 16 + 1)))
+      i = i + 1
+    end
+
+    i = 8
+
+    while i < n && i < 16
+      b = b + (uint64(k[i]) << (8 * uint(i - 8)))
+      i = i + 1
+    end
+
+    i = 0
+
+    while i < n && i < 8
+      a = a + (uint64(k[i]) << (8 * uint(i)))
+      i = i + 1
+    end
+
+    _, _, c = cMix64(a, b, c)
+
+    return c
+  end
+
+  def PHash(path) # (string) -> uint64
+    return cJHash64(Array[byte].(path), 0)
+  end
+
+  var ItemType = Class.new(uint8) do
+    protected def String # () -> string
+      case self
+      when ItemTypeFile
+        return "File"
+      when ItemTypeSymLink
+        return "SymLink"
+      when ItemTypeDirectory
+        return "Directory"
+      when ItemTypeUnsupported
+        return "Unsupported"
+      when ItemTypeVirtualFile
+        return "VirtualFile"
+      when ItemTypeVirtualFileDownload
+        return "VirtualFileDownload"
+      when ItemTypeVirtualFileDehydration
+        return "VirtualFileDehydration"
+      end
+
+      return "Unknown"
+    end
+  end
+
+  const :ItemTypeFile, 0
+  const :ItemTypeSymLink, 1
+  const :ItemTypeDirectory, 2
+  const :ItemTypeUnsupported, 3
+
+  const :ItemTypeVirtualFile, 4
+
+  const :ItemTypeVirtualFileDownload, 5
+
+  const :ItemTypeVirtualFileDehydration, 6
+
+  class SyncJournalFileRecord
+    attr_accessor :Path, string
+    attr_accessor :Inode, uint64
+    attr_accessor :ModTime, int64
+    attr_accessor :HasModTime, bool
+    attr_accessor :Type, ItemType
+    attr_accessor :Etag, string
+    attr_accessor :FileID, string
+    attr_accessor :FileSize, int64
+    attr_accessor :RemotePerm, RemotePermissions
+    attr_accessor :ServerHasIgnoredFiles, bool
+    attr_accessor :HasDirtyPlaceholder, bool
+    attr_accessor :ChecksumHeader, string
+
+    attr_accessor :Err, string
+
+    protected def Validate # () -> error
+      if self.RemotePerm.IsNull()
+        return fmt.Errorf("record %q: remotePerm is null", self.Path)
+      elsif self.Inode == 0
+        return fmt.Errorf("record %q: inode is 0", self.Path)
+      elsif self.HasModTime == false
+        return fmt.Errorf("record %q: no modtime", self.Path)
+      elsif self.FileID == ""
+        return fmt.Errorf("record %q: fileId is empty", self.Path)
+      elsif self.Type == ItemTypeUnsupported
+        return fmt.Errorf("record %q: type is unsupported", self.Path)
+      end
+
+      return nil
+    end
+
+    protected def IsValid # () -> bool
+      return !self.HasError() && self.Path != ""
+    end
+
+    protected def HasError # () -> bool
+      return self.Err != ""
+    end
+
+    protected def ModDateTime # () -> time.Time
+      return time.Unix(self.ModTime, 0).UTC()
+    end
+
+    protected def IsDirectory # () -> bool
+      return self.Type == ItemTypeDirectory
+    end
+
+    protected def IsFile # () -> bool
+      return self.Type == ItemTypeFile || self.Type == ItemTypeVirtualFileDehydration
+    end
+
+    protected def IsVirtualFile # () -> bool
+      return self.Type == ItemTypeVirtualFile || self.Type == ItemTypeVirtualFileDownload
+    end
+
+    protected def Name # () -> string
+      return self.Path[strings.LastIndex(self.Path, "/") + 1...]
+    end
+
+    protected def String # () -> string
+      if self.HasError()
+        return fmt.Sprintf("SyncJournalFileRecord(Error: %s)", self.Err)
+      end
+
+      return fmt.Sprintf("SyncJournalFileRecord(path: %s, inode: %d, modtime: %d, type: %v, " +
+        "etag: %s, fileId: %s, remotePerm: %s, size: %d, checksum: %s, " +
+        "serverHasIgnoredFiles: %t, hasDirtyPlaceholder: %t)",
+        self.Path, self.Inode, self.ModTime, self.Type, self.Etag, self.FileID, self.RemotePerm,
+        self.FileSize, self.ChecksumHeader, self.ServerHasIgnoredFiles, self.HasDirtyPlaceholder)
+    end
+
+    protected def Equal(o) # (SyncJournalFileRecord) -> bool
+      return self.Path == o.Path && self.Inode == o.Inode && self.ModTime == o.ModTime &&
+        self.Type == o.Type && self.Etag == o.Etag && self.FileID == o.FileID &&
+        self.FileSize == o.FileSize && self.RemotePerm == o.RemotePerm &&
+        self.ServerHasIgnoredFiles == o.ServerHasIgnoredFiles &&
+        self.ChecksumHeader == o.ChecksumHeader
+    end
+  end
+
+  def NewSyncJournalFileRecord(path, typ) # (string, ItemType) -> SyncJournalFileRecord
+    return SyncJournalFileRecord.new(Path: path, Type: typ)
+  end
+
+  def SyncJournalFileRecordError(err) # (string) -> SyncJournalFileRecord
+    return SyncJournalFileRecord.new(Type: ItemTypeUnsupported, Err: err)
+  end
+
+  def RecordQuery # () -> string
+    return SELECT_FILE_RECORD
+  end
+
+  def scanFileRecord(row) # interface{ Scan(...any) error } -> (SyncJournalFileRecord, error)
+    var :path, sql.NullString
+    var :etag, sql.NullString
+    var :fileid, sql.NullString
+    var :perm, sql.NullString
+    var :checksum, sql.NullString
+    var :inode, sql.NullInt64
+    var :modtime, sql.NullInt64
+    var :typ, sql.NullInt64
+    var :filesize, sql.NullInt64
+    var :ignoredChildren, sql.NullInt64
+    var :dirty, sql.NullInt64
+
+    if (err = row.Scan(@path, @inode, @modtime, @typ, @etag, @fileid, @perm,
+      @filesize, @ignoredChildren, @checksum, @dirty))
+      return SyncJournalFileRecord.new(), err
+    end
+
+    return SyncJournalFileRecord.new(
+      Path: path.String,
+      Inode: uint64(inode.Int64),
+      ModTime: modtime.Int64,
+      HasModTime: modtime.Valid,
+      Type: ItemType(typ.Int64),
+      Etag: etag.String,
+      FileID: fileid.String,
+      RemotePerm: RemotePermissionsFromDbValue(perm.String),
+      FileSize: filesize.Int64,
+      ServerHasIgnoredFiles: ignoredChildren.Int64 > 0,
+      ChecksumHeader: checksum.String,
+      HasDirtyPlaceholder: dirty.Int64 != 0
+    ), nil
+  end
+
+  var Permission = Class.new(int)
+
+  const :CanWrite, 1
+  const :CanDelete, 2
+  const :CanRename, 3
+  const :CanMove, 4
+  const :CanAddFile, 5
+  const :CanAddSubDirectories, 6
+  const :CanReshare, 7
+  const :IsShared, 8
+  const :IsMounted, 9
+  const :IsMountedSub, 10
+  const :DeprecatedRemoved, 11
+
+  PERMISSIONS_COUNT = DeprecatedRemoved
+
+  PERMISSION_LETTERS = " WDNVCKRSMmz"
+
+  REMOTE_PERM_NOT_NULL_MASK = 0x1
+
+  class RemotePermissions
+    attr_accessor :value, uint16
+
+    def fromArray(s) # (string)
+      self.value = REMOTE_PERM_NOT_NULL_MASK
+
+      s.each do |_, r|
+        i = strings.IndexRune(PERMISSION_LETTERS, r)
+
+        if i >= 0
+          self.value = self.value | 1 << uint(i)
+        end
+      end
+    end
+
+    protected def ToDbValue # () -> string
+      if self.IsNull()
+        return ""
+      end
+
+      var :b, strings.Builder
+      i = 1
+
+      while i <= int(PERMISSIONS_COUNT)
+        if self.value & (1 << uint(i)) != 0
+          b.WriteByte(PERMISSION_LETTERS[i])
+        end
+
+        i = i + 1
+      end
+
+      if b.Len() == 0
+        return " "
+      end
+
+      return b.String()
+    end
+
+    protected def String # () -> string
+      return self.ToDbValue()
+    end
+
+    protected def HasPermission(perm) # (Permission) -> bool
+      return self.value & (1 << uint(perm)) != 0
+    end
+
+    def SetPermission(perm) # (Permission)
+      self.value = self.value | (1 << uint(perm)) | REMOTE_PERM_NOT_NULL_MASK
+    end
+
+    def UnsetPermission(perm) # (Permission)
+      self.value = self.value & ~uint16(1 << uint(perm))
+    end
+
+    protected def IsNull # () -> bool
+      return self.value & REMOTE_PERM_NOT_NULL_MASK == 0
+    end
+  end
+
+  def RemotePermissionsFromDbValue(value) # (string) -> RemotePermissions
+    if value == ""
+      return RemotePermissions.new()
+    end
+
+    var :perm, RemotePermissions
+    perm.fromArray(value)
+
+    return perm
+  end
+
+  def RemotePermissionsFromServerString(value) # (string) -> RemotePermissions
+    var :perm, RemotePermissions
+    perm.fromArray(value)
+
+    return perm
+  end
+end

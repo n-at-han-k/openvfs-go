@@ -41,7 +41,7 @@ module Unix
     HydrationTimeoutSeconds: int
   )
 
-  def parseConfig(b) # ([]byte) -> (Config, error)
+  def parseConfig(b) # ([]byte) -> Config, error
     var :cfg, Config
 
     err = json.Unmarshal(b, @cfg)
@@ -106,7 +106,7 @@ module Unix
 
   # ProcessArgs is processArgs(). argv[0] is the program name, as in C.
   # The second return value is false where upstream returns an empty optional.
-  def ProcessArgs(argv, stdout, stderr) # ([]string, io.Writer, io.Writer) -> (Args, bool)
+  def ProcessArgs(argv, stdout, stderr) # ([]string, io.Writer, io.Writer) -> Args, bool
     out = NewArgs()
 
     if len(argv) == 0
@@ -237,13 +237,14 @@ module Unix
   # opterr is 0 upstream, so an unrecognised option is reported by getopt as '?'
   # and lands in a default branch that only asserts; a release build therefore
   # skips it, which is what happens here.
-  def getopt(args, optstring, stderr) # ([]string, string, io.Writer) -> ([]parsedOption, []string, bool)
-    takesArg = lambda { |c| # (byte) -> (bool, bool)
+  def getopt(args, optstring, stderr) # ([]string, string, io.Writer) -> []parsedOption, []string, bool
+    takesArg = lambda { |c| # (byte) -> bool, bool
       i = 0
 
       while i < len(optstring)
         if optstring[i] == c && c != ':'
-          return true, i + 1 < len(optstring) && optstring[i + 1] == ':'
+          wants = i + 1 < len(optstring) && optstring[i + 1] == ':'
+          return true, wants
         end
 
         i = i + 1

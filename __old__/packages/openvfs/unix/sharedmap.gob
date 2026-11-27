@@ -1,0 +1,207 @@
+require "fmt"
+require "sort"
+require "sync"
+require "time"
+
+module Unix
+  # Transpiled from src/openvfsfuse/sharedmap.{h,cpp}.
+
+  # HydJobState is the state a hydration job can be in. A job starts out Running
+  # and is moved to one of the other states by the socket thread.
+  var HydJobState = Class.new(int) do
+    protected def String # () -> string
+      case self
+      when HydSuccess
+        return "success"
+      when HydFailed
+        return "failed"
+      when HydRunning
+        return "running"
+      end
+
+      return "undef"
+    end
+  end
+
+  const :HydSuccess, 0
+  const :HydRunning, 1
+  const :HydFailed, -1
+
+  # HydJob represents a hydration job that is stored in the job queue and passes
+  # data between fuse- and worker thread.
+  var HydJob = Struct.new(State: HydJobState)
+
+  # HydJobResult is the outcome of a hydration job after it left the Running
+  # state.
+  var HydJobResult = Class.new(int)
+
+  # the client reported the file as hydrated
+  const :HydResultSucceeded, 0
+  # the client reported an error, or the request could not be sent
+  const :HydResultFailed, 1
+  # the client did not answer within the timeout
+  const :HydResultTimedOut, 2
+  # the job vanished from the map, which should not happen
+  const :HydResultLost, 3
+
+  class SharedMap
+    attr_accessor :mu, sync.Mutex
+    attr_accessor :data, Hash[int, HydJob]
+    # waiters stands in for _cv: closing a channel wakes its waiter, which
+    # then re-evaluates the predicate the way condition_variable::wait() does.
+    attr_accessor :waiters, Array[Chan[Struct[]]]
+    attr_accessor :pid, int64
+
+    # notifyAllLocked is _cv.notify_all().
+    def notifyAllLocked # ()
+      self.waiters.each do |_, ch|
+        close(ch)
+      end
+
+      self.waiters = nil
+    end
+
+    def Insert(key, value) # (int, HydJob)
+      self.mu.Lock()
+      defer self.mu.Unlock()
+      self.data[key] = value
+      self.notifyAllLocked()
+    end
+
+    def Get(key) # (int) -> (HydJob, bool)
+      self.mu.Lock()
+      defer self.mu.Unlock()
+
+      job, ok = self.data[key]
+
+      return job, ok
+    end
+
+    def Set(key, value) # (int, HydJob) -> bool
+      self.mu.Lock()
+      defer self.mu.Unlock()
+
+      unless (_, found = self.data[key])
+        return false
+      end
+
+      self.data[key] = value
+      self.notifyAllLocked()
+
+      return true
+    end
+
+    def Remove(id) # (int) -> bool
+      self.mu.Lock()
+      defer self.mu.Unlock()
+
+      unless (_, found = self.data[id])
+        return false
+      end
+
+      delete(self.data, id)
+      self.notifyAllLocked()
+
+      return true
+    end
+
+    # WaitForJob blocks until the job identified by key leaves the Running state,
+    # or until timeout has elapsed.
+    #
+    # The wait is bounded by wall-clock time rather than by a number of polls, and
+    # a state change is observed as soon as the socket thread publishes it.
+    def WaitForJob(key, timeout) # (int, time.Duration) -> HydJobResult
+      deadline = time.Now().Add(timeout)
+
+      self.mu.Lock()
+      defer self.mu.Unlock()
+
+      loop do
+        # The predicate handed to condition_variable::wait_for(): the job is
+        # gone, or it is no longer running. A wake-up caused by any other key
+        # finds the predicate false and goes back to waiting.
+        job, found = self.data[key]
+
+        unless found
+          return HydResultLost
+        end
+
+        if job.State != HydRunning
+          if job.State == HydSuccess
+            return HydResultSucceeded
+          end
+
+          return HydResultFailed
+        end
+
+        remaining = time.Until(deadline)
+
+        if remaining <= 0
+          return HydResultTimedOut
+        end
+
+        ch = make(Chan[Struct[]])
+        self.waiters = append(self.waiters, ch)
+        self.mu.Unlock()
+
+        timer = time.NewTimer(remaining)
+
+        case
+        when ch.<<
+        when timer.C.<<
+        end
+
+        timer.Stop()
+
+        self.mu.Lock()
+        self.dropWaiterLocked(ch)
+      end
+    end
+
+    # dropWaiterLocked forgets a channel that was woken by the deadline rather than
+    # by a notification, so a run of timeouts cannot grow the waiter list.
+    def dropWaiterLocked(ch) # (chan bool)
+      self.waiters.each do |i, c|
+        if c == ch
+          self.waiters = append(self.waiters[...i], *self.waiters[i + 1...])
+          return
+        end
+      end
+    end
+
+    def SetDesktopClientPID(pid) # (int64)
+      self.mu.Lock()
+      defer self.mu.Unlock()
+      self.pid = pid
+    end
+
+    def DesktopClientPID # () -> int64
+      self.mu.Lock()
+      defer self.mu.Unlock()
+
+      return self.pid
+    end
+
+    def PrintAll # ()
+      self.mu.Lock()
+      defer self.mu.Unlock()
+
+      keys = make(Array[int], 0, len(self.data))
+
+      self.data.each do |k|
+        keys = append(keys, k)
+      end
+
+      # std::map iterates in key order.
+      sort.Ints(keys)
+
+      keys.each do |_, k|
+        fmt.Printf("%d: %s\n", k, self.data[k].State)
+      end
+    end
+  end
+
+  def NewSharedMap # () -> *SharedMap
+    return @SharedMap.new(data: make(Hash[int, HydJob]))
+  end
+end

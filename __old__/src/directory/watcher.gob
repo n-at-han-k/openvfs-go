@@ -1,0 +1,212 @@
+require "context"
+require "io/fs"
+require "os"
+require "path/filepath"
+require "strings"
+
+require "github.com/fsnotify/fsnotify"
+require "github.com/rs/zerolog/log"
+
+module Directory
+  var EventKind = Class.new(uint8) do
+    protected def String # () -> string
+      case self
+      when Create
+        return "Create"
+      when Write
+        return "Write"
+      when Remove
+        return "Remove"
+      when Rename
+        return "Rename"
+      when Chmod
+        return "Chmod"
+      when Poll
+        return "Poll"
+      when LocalEntry
+        return "LocalEntry"
+      end
+
+      return "Unknown"
+    end
+  end
+
+  const :Create, 1
+  const :Write, 2
+  const :Remove, 4
+  const :Rename, 8
+  const :Chmod, 16
+  const :Poll, 32
+  const :LocalEntry, 64
+
+  def fromFsnotify(op) # (fsnotify.Op) -> EventKind
+    if op.Has(fsnotify.Create)
+      return Create
+    elsif op.Has(fsnotify.Write)
+      return Write
+    elsif op.Has(fsnotify.Remove)
+      return Remove
+    elsif op.Has(fsnotify.Rename)
+      return Rename
+    elsif op.Has(fsnotify.Chmod)
+      return Chmod
+    end
+
+    return 0
+  end
+
+  var Event = Struct.new(
+    Kind: EventKind,
+    Path: string,
+    Local: LocalInfo
+  )
+
+  class Watcher
+    attr_accessor :root, string
+    attr_accessor :w, @@fsnotify.Watcher
+    # func(string) bool
+    attr_accessor :ignoredFn, Proc
+    # func(Event)
+    attr_accessor :onChange, Proc
+    attr_accessor :watched, Hash[string, Struct[]]
+
+    def run(ctx) # (context.Context)
+      loop do
+        case
+        when ctx.Done().<<
+          return
+        when ev, ok = self.w.Events.<<
+          unless ok
+            return
+          end
+
+          self.onEvent(ev)
+        when err, ok = self.w.Errors.<<
+          unless ok
+            return
+          end
+
+          log.Warn().Err(err).Msg("fsnotify")
+          self.onChange(Event.new(Kind: Poll))
+        end
+      end
+    end
+
+    def onEvent(ev) # (fsnotify.Event)
+      rel, err = filepath.Rel(self.root, ev.Name)
+      if err
+        return
+      end
+
+      rel = filepath.ToSlash(rel)
+
+      if self.ignored(rel)
+        return
+      end
+
+      Array[fsnotify.Op].new(fsnotify.Create, fsnotify.Write, fsnotify.Remove, fsnotify.Rename, fsnotify.Chmod).each do |_, op|
+        if ev.Op.Has(op)
+          self.onChange(Event.new(Kind: fromFsnotify(op), Path: rel))
+        end
+      end
+
+      if ev.Op & (fsnotify.Create | fsnotify.Write) != 0
+        st, err = os.Stat(ev.Name)
+
+        if err == nil && st.IsDir()
+          if (err = self.addTree(ev.Name))
+            log.Warn().Err(err).Msgf("watch %s", ev.Name)
+            self.onChange(Event.new(Kind: Poll))
+          end
+        end
+      end
+
+      if ev.Op & (fsnotify.Remove | fsnotify.Rename) != 0
+        self.removeTree(ev.Name)
+      end
+    end
+
+    def addTree(dir) # (string) -> error
+      return filepath.WalkDir(dir, lambda { |p, d, err| # (string, fs.DirEntry, error) -> error
+        if err
+          return err
+        end
+
+        unless d.IsDir()
+          return nil
+        end
+
+        rel, err = filepath.Rel(self.root, p)
+        if err
+          return err
+        end
+
+        if p != dir && self.ignored(filepath.ToSlash(rel))
+          return filepath.SkipDir
+        end
+
+        return self.add(p)
+      })
+    end
+
+    def add(dir) # (string) -> error
+      if (_, ok = self.watched[dir])
+        return nil
+      end
+
+      if (err = self.w.Add(dir))
+        return err
+      end
+
+      self.watched[dir] = Struct[].new()
+
+      return nil
+    end
+
+    def removeTree(root) # (string)
+      self.watched.each do |dir|
+        if dir == root || strings.HasPrefix(dir, root + string(os.PathSeparator))
+          _ = self.w.Remove(dir)
+          delete(self.watched, dir)
+        end
+      end
+    end
+
+    def ignored(p) # (string) -> bool
+      if strings.HasPrefix(filepath.Base(p), ".sync_")
+        return true
+      end
+
+      if self.ignoredFn != nil
+        return self.ignoredFn(p)
+      end
+
+      return false
+    end
+  end
+
+  def RunWatcher(ctx, root, ignored, onChange) # context.Context, string, func(string) bool, func(Event)
+    w, err = fsnotify.NewWatcher()
+    if err
+      log.Warn().Err(err).Msg("fsnotify")
+      return
+    end
+
+    defer w.Close()
+
+    r = @Watcher.new(
+      root: root,
+      w: w,
+      ignoredFn: ignored,
+      onChange: onChange,
+      watched: make(Hash[string, Struct[]])
+    )
+
+    if (err = r.addTree(root))
+      log.Warn().Err(err).Msgf("watch %s", root)
+      return
+    end
+
+    r.run(ctx)
+  end
+end

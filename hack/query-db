@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+db="sync-journal.db"
+table=""
+
+for arg in "$@"; do
+  if [[ -f "$arg" || "$arg" == *.db ]]; then
+    db="$arg"
+  else
+    table="$arg"
+  fi
+done
+
+if [[ -n "$table" ]]; then
+  sqlite3 -header -column "$db" "SELECT * FROM \"$table\";"
+else
+  sqlite3 "$db" ".tables"
+fi

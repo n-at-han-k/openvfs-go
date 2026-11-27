@@ -53,9 +53,7 @@ module Unix
   end
 
   def statAttr(out, st) # (*gofuse.Attr, *unix.Stat_t)
-    # Go casts to (*syscall.Stat_t); Gob has no spelling for a conversion to a
-    # pointer type.
-    out.FromStat(unsafe.Pointer(st))
+    out.FromStat((*syscall.Stat_t)(unsafe.Pointer(st)))
   end
 
   # node is one path in the mounted tree. rel is the path relative to the root
@@ -64,6 +62,10 @@ module Unix
   # Upstream embeds fs.Inode; Gob has no spelling for an embedded field, so it
   # is a named one here.
   var node = Struct.new(Inode: fs.Inode, v: @@VFSFuseContext, rel: string) do
+    def EmbeddedInode # () -> *fs.Inode
+      return &self.Inode
+    end
+
     # relPath is the path handed to the *at() syscalls. "." is the root itself.
     def relPath # () -> string
       if self.rel == ""
@@ -106,7 +108,7 @@ module Unix
     end
 
     def newChild(ctx, rel, st) # (context.Context, string, unix.Stat_t) -> *fs.Inode
-      return self.NewInode(ctx, @node.new(v: self.v, rel: rel), fs.StableAttr.new(Mode: statMode(@st), Ino: st.Ino))
+      return self.Inode.NewInode(ctx, @node.new(v: self.v, rel: rel), fs.StableAttr.new(Mode: statMode(@st), Ino: st.Ino))
     end
 
     # Lookup has no upstream counterpart: the libfuse high level API derives it
@@ -417,7 +419,7 @@ module Unix
         else
           fd, openErr = unix.Openat(self.v.rootHandle, rel, unix.O_WRONLY | unix.O_CLOEXEC, 0)
 
-          if openErr
+          if openErr != nil
             err = openErr
           else
             err = unix.Ftruncate(fd, int64(size))
@@ -540,12 +542,13 @@ module Unix
       end
 
       if caller != nil
-        if (chownErr = unix.Fchown(fd, int(caller.Uid), int(caller.Gid)))
+        chownErr = unix.Fchown(fd, int(caller.Uid), int(caller.Gid))
+        if chownErr != nil
           cleanupErr = unix.Unlinkat(self.v.rootHandle, rel, 0)
           unix.Close(fd)
           openvfsfuseLog(caller, path, "create", -1, "set ownership after create %o", mode)
 
-          if cleanupErr
+          if cleanupErr != nil
             openvfsfuseLog(caller, path, "create", -1, "failed to remove incomplete file: errno %d", errnoValue(cleanupErr))
           end
 

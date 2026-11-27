@@ -1,0 +1,27 @@
+module Journal
+  CREATE_UPLOAD_INFO_TABLE = `CREATE TABLE IF NOT EXISTS uploadinfo(
+path VARCHAR(4096),
+size INTEGER(8),
+modtime INTEGER(8),
+contentChecksum TEXT,
+url TEXT,
+PRIMARY KEY(path)
+);`
+
+  GET_UPLOAD_INFO_QUERY = `SELECT size, modtime, contentChecksum, url FROM uploadinfo WHERE path=?1`
+
+  GET_ALL_UPLOAD_INFO_QUERY = `SELECT size, modtime, contentChecksum, path, url FROM uploadinfo`
+
+  SET_UPLOAD_INFO_QUERY = `INSERT OR REPLACE INTO uploadinfo
+(path, size, modtime, contentChecksum, url)
+VALUES ( ?1 , ?2, ?3 , ?4 , ?5 )`
+
+  var UploadInfo = Struct.new(
+    Size: int64,
+    ModTime: int64,
+    ContentChecksum: string,
+    URL: string,
+    Path: string,
+    Valid: bool
+  )
+end

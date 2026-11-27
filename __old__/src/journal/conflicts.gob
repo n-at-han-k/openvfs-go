@@ -1,0 +1,26 @@
+module Journal
+  CREATE_CONFLICTS_TABLE = `CREATE TABLE IF NOT EXISTS conflicts(
+path TEXT PRIMARY KEY,
+baseFileId TEXT,
+baseEtag TEXT,
+baseModtime INTEGER
+);`
+
+  ADD_CONFLICTS_BASE_PATH = "ALTER TABLE conflicts ADD COLUMN basePath TEXT;"
+
+  SET_CONFLICT_RECORD_QUERY = `INSERT OR REPLACE INTO conflicts
+(path, baseFileId, baseModtime, baseEtag, basePath)
+VALUES (?1, ?2, ?3, ?4, ?5);`
+
+  GET_CONFLICT_RECORD_QUERY = `SELECT baseFileId, baseModtime, baseEtag, basePath FROM conflicts WHERE path=?1;`
+
+  DELETE_CONFLICT_QUERY = `DELETE FROM conflicts WHERE path=?1;`
+
+  var ConflictRecord = Struct.new(
+    Path: string,
+    BaseFileID: string,
+    BaseEtag: string,
+    BaseModtime: int64,
+    BasePath: string
+  )
+end

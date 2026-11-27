@@ -1,0 +1,92 @@
+#go:build linux
+
+# Package linux is the OpenVFS filesystem on Linux: the openvfsfuse layer,
+# which mounts over the sync folder and answers the kernel's filesystem calls.
+#
+# It supplies the Linux half of the unix backend -- the l*xattr family, /proc
+# based process identity, mknodat/mkfifoat, the 32 bit st_mode and syslog --
+# and exposes the entry points the openvfs package dispatches to.
+
+require "context"
+require "os"
+
+require "example.com/project/packages/openvfs/unix"
+require "example.com/project/src/directory"
+require "github.com/rs/zerolog/log"
+
+module Linux
+  def init # ()
+    unix.SetPlatform(unix.Platform.new(
+      XattrGet: xattrGet,
+      XattrSet: xattrSet,
+      XattrList: xattrList,
+      XattrRemove: xattrRemove,
+      IsErrNoAttr: isErrNoAttr,
+      CallerName: getcallernameByPid,
+      CallerIsThreadOfProcess: callerIsThreadOfProcess,
+      StatMode: statMode,
+      FillStatfs: fillStatfs,
+      MknodAt: mknodAt,
+      MkfifoAt: mkfifoAt,
+      LogToSyslog: logToSyslog
+    ))
+  end
+
+  # Run registers the sync root, mounts it and serves until ctx is cancelled.
+  def Run(ctx, root, owner, socketPath, onChange) # context.Context, string, string, string, func(directory.Event)
+    report(unix.Run(ctx, root, owner, socketPath, drain("openvfs")))
+  end
+
+  # ServeAPI serves the socket API the filesystem talks to.
+  def ServeAPI(ctx, socketPath, onChange) # (context.Context, string, func(directory.Event)) -> error
+    ready = make(Chan[error], 1)
+    err = unix.ServeAPI(ctx, socketPath, ready)
+    if err
+      return err
+    end
+
+    return ready.<<
+  end
+
+  # Main is the openvfsfuse daemon's entry point.
+  def Main(ctx, argv) # (context.Context, []string) -> int
+    args, ok = unix.ProcessArgs(argv, os.Stdout, os.Stderr)
+
+    unless ok
+      return -1
+    end
+
+    if (err = unix.InitializeOpenVFSFuse(ctx, args, drain("openvfs")))
+      return -1
+    end
+
+    return 0
+  end
+
+  # RunStat is the vfsstat entry point.
+  def RunStat(argv) # ([]string) -> int
+    return unix.RunStat(argv)
+  end
+
+  # drain reports the outcome the mount publishes once it is up, which arrives
+  # out of band because the mount call itself blocks.
+  def drain(what) # (string) -> chan<- error
+    ready = make(Chan[error], 1)
+
+    go lambda {
+      err = ready.<<
+
+      if err
+        log.Warn().Err(err).Msgf("%s", what)
+      end
+    }.()
+
+    return ready
+  end
+
+  def report(err) # (error)
+    if err
+      log.Warn().Err(err).Msg("openvfs")
+    end
+  end
+end

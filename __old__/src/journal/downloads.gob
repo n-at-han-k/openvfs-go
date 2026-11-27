@@ -1,0 +1,31 @@
+module Journal
+  CREATE_DOWNLOAD_INFO_TABLE = `CREATE TABLE IF NOT EXISTS downloadinfo(
+path VARCHAR(4096),
+tmpfile VARCHAR(4096),
+etag VARCHAR(32),
+errorcount INTEGER,
+PRIMARY KEY(path)
+);`
+
+  GET_DOWNLOAD_INFO_QUERY = `SELECT tmpfile, etag, errorcount FROM downloadinfo WHERE path=?1`
+
+  SET_DOWNLOAD_INFO_QUERY = `INSERT OR REPLACE INTO downloadinfo
+(path, tmpfile, etag, errorcount)
+VALUES ( ?1 , ?2, ?3, ?4 )`
+
+  DELETE_DOWNLOAD_INFO_QUERY = `DELETE FROM downloadinfo WHERE path=?1`
+
+  GET_ALL_DOWNLOAD_INFO_QUERY = `SELECT tmpfile, etag, errorcount, path FROM downloadinfo`
+
+  var DownloadInfo = Struct.new(
+    TmpFile: string,
+    Etag: string,
+    ErrorCount: int,
+    Valid: bool
+  )
+
+  var DownloadInfoWithPath = Struct.new(
+    DownloadInfo: DownloadInfo,
+    Path: string
+  )
+end

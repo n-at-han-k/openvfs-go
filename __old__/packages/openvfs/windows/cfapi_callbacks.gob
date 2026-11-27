@@ -1,0 +1,276 @@
+#go:build windows
+
+require "os"
+require "path/filepath"
+require "runtime"
+require "strings"
+require "sync"
+require "syscall"
+require "unsafe"
+
+require "github.com/deploymenttheory/go-bindings-win32/bindings/win32/storage/cloudfilters", cf
+
+module Windows
+  # The CF_CALLBACK functions of cfapiwrapper.cpp.
+  #
+  # One thing differs from C++ by necessity: Windows calls these on its own
+  # threads and holds the callback context for the life of the connection, so it
+  # cannot be a Go pointer -- Go forbids storing one in memory owned by C -- and
+  # is an index into vfsRegistry instead.
+  #
+  # The CF_CALLBACK_INFO and CF_CALLBACK_PARAMETERS arguments point into memory
+  # Windows owns for the duration of the call, so nothing read out of them may
+  # outlive the callback; every byte slice taken from one is copied.
+
+  var :vfsRegistryMu, sync.RWMutex
+  var vfsRegistry = Hash[uint64, @@VfsCfApi].new()
+  var :vfsRegistryNext, uint64, 1
+  var :vfsPinner, runtime.Pinner
+
+  # callbackToken is what CfConnectSyncRoot is handed as its context. It holds no
+  # Go pointers of its own, so pinning it is enough to make its address safe to
+  # give to the cloud filter for the life of the connection.
+  var callbackToken = Struct.new(id: uint64)
+
+  # registerVfs hands out the opaque context passed to CfConnectSyncRoot.
+  #
+  # The context cannot be the *VfsCfApi itself: it is full of Go pointers, and
+  # the cloud filter keeps the context for the life of the connection. A pinned
+  # token carrying only an index is passed instead, which the callbacks resolve
+  # back through this map.
+  def registerVfs(v) # (*VfsCfApi) -> unsafe.Pointer
+    vfsRegistryMu.Lock()
+    defer vfsRegistryMu.Unlock()
+
+    id = vfsRegistryNext
+    vfsRegistryNext = vfsRegistryNext + 1
+    vfsRegistry[id] = v
+    token = @callbackToken.new(id: id)
+    vfsPinner.Pin(token)
+    v.registryID = id
+    v.token = token
+
+    return unsafe.Pointer(token)
+  end
+
+  def unregisterVfs(id) # (uint64)
+    vfsRegistryMu.Lock()
+    defer vfsRegistryMu.Unlock()
+    delete(vfsRegistry, id)
+  end
+
+  # lookupVfs resolves CF_CALLBACK_INFO::CallbackContext back to the plugin, and
+  # stands in for the reinterpret_cast plus the className assert upstream makes.
+  #
+  # Go casts the context to (*callbackToken); Gob has no spelling for a
+  # conversion to a pointer type.
+  def lookupVfs(context) # (unsafe.Pointer) -> *VfsCfApi
+    if context == nil
+      return nil
+    end
+
+    token = context
+    vfsRegistryMu.RLock()
+    defer vfsRegistryMu.RUnlock()
+
+    return vfsRegistry[token.id]
+  end
+
+  # cfApiFetchDataCallback is the callback of the same name.
+  def cfApiFetchDataCallback(callbackInfo, parameters) # (*cf.CF_CALLBACK_INFO, *cf.CF_CALLBACK_PARAMETERS) -> uintptr
+    context = logCallback("cfApiFetchDataCallback", callbackInfo,
+      Hash[string, string].new("reason" => enumToDisplayNameDehydrationReason(fetchDataArm(parameters).LastDehydrationReason)),
+      Array[string].new("reason"))
+
+    if callbackInfo.ProcessInfo != nil && uint32(os.Getpid()) == callbackInfo.ProcessInfo.ProcessId
+      lcCfApiWrapper.Critical("implicit hydration triggered by the client itself. Will lead to a deadlock. Cancel %s %d",
+        context.Path, context.TransferKey)
+
+      return 0
+    end
+
+    if context.Vfs == nil
+      return 0
+    end
+
+    fileSize = callbackInfo.FileSize
+
+    # switch to main thread
+    context.Vfs.post(lambda {
+      hydration = RequestHydration(context, fileSize)
+
+      if hydration != nil
+        hydration.Start()
+      end
+    })
+
+    return 0
+  end
+
+  # cfApiCancelFetchData is the callback of the same name.
+  def cfApiCancelFetchData(callbackInfo, _) # (*cf.CF_CALLBACK_INFO, *cf.CF_CALLBACK_PARAMETERS) -> uintptr
+    context = logCallback("cfApiCancelFetchData", callbackInfo, nil, nil)
+
+    lcCfApiWrapper.Info("Cancel fetch data of %s", context)
+
+    if context.Vfs != nil
+      context.Vfs.post(lambda {
+        context.Vfs.CancelHydration(context)
+      })
+    end
+
+    return 0
+  end
+
+  # cfApiNotifyFileOpenCompletion is the callback of the same name.
+  def cfApiNotifyFileOpenCompletion(callbackInfo, _) # (*cf.CF_CALLBACK_INFO, *cf.CF_CALLBACK_PARAMETERS) -> uintptr
+    logCallback("cfApiNotifyFileOpenCompletion", callbackInfo, nil, nil)
+
+    return 0
+  end
+
+  # cfApiValidateData is the callback of the same name.
+  def cfApiValidateData(callbackInfo, _) # (*cf.CF_CALLBACK_INFO, *cf.CF_CALLBACK_PARAMETERS) -> uintptr
+    logCallback("cfApiValidateData", callbackInfo, nil, nil)
+
+    return 0
+  end
+
+  # cfApiCancelFetchPlaceHolders is the callback of the same name.
+  def cfApiCancelFetchPlaceHolders(callbackInfo, _) # (*cf.CF_CALLBACK_INFO, *cf.CF_CALLBACK_PARAMETERS) -> uintptr
+    logCallback("cfApiCancelFetchPlaceHolders", callbackInfo, nil, nil)
+
+    return 0
+  end
+
+  # cfApiRename is the callback of the same name.
+  def cfApiRename(callbackInfo, callbackParameters) # (*cf.CF_CALLBACK_INFO, *cf.CF_CALLBACK_PARAMETERS) -> uintptr
+    rename = renameArm(callbackParameters)
+
+    target = utf16PtrToString(callbackInfo.VolumeDosName) + utf16PtrToString(rename.TargetPath)
+
+    # isExcluded can't handle windows paths, as the target does not exist yet,
+    # we can't use QFileInfo::canonicalFilePath
+    qtPath = strings.ReplaceAll(target, "\\", "/")
+
+    context = logCallback("cfApiRename", callbackInfo,
+      Hash[string, string].new("flags" => flagsToString(rename.Flags), "target" => target),
+      Array[string].new("flags", "target"))
+
+    reject = false
+
+    # if both are managed by us, we prevent the move of a placeholder to a
+    # folder where its ignored, as it would implicitly cause a deletion
+    #
+    # CF_CALLBACK_RENAME_FLAG_TARGET_IN_SCOPE is also set for any other
+    # sync root we manage but in that case windows will hydrate the file
+    # before its moved
+    if rename.Flags & (cf.CF_CALLBACK_RENAME_FLAG_TARGET_IN_SCOPE | cf.CF_CALLBACK_RENAME_FLAG_SOURCE_IN_SCOPE) != 0 &&
+      context.Vfs != nil &&
+      isChildPathOf(target, context.Vfs.params.FilesystemPath()) &&
+      context.Vfs.IsDehydratedPlaceholder(context.Path) &&
+      context.Vfs.params.SyncEngine != nil &&
+      context.Vfs.params.SyncEngine.IsExcluded(qtPath)
+      reject = true
+    end
+
+    if reject
+      lcCfApiWrapper.Info("Rejecting rename of %s", context)
+    else
+      lcCfApiWrapper.Info("Accepting rename of %s", context)
+    end
+
+    opInfo = cf.CF_OPERATION_INFO.new()
+    opInfo.StructSize = uint32(unsafe.Sizeof(opInfo))
+    opInfo.ConnectionKey = callbackInfo.ConnectionKey
+    opInfo.TransferKey = callbackInfo.TransferKey
+    opInfo.Type = cf.CF_OPERATION_TYPE_ACK_RENAME
+
+    params = cf.CF_OPERATION_PARAMETERS.new()
+    params.ParamSize = sizeOfOpParamAckRename
+    ack = ackRenameArm(@params)
+
+    if reject
+      ack.CompletionStatus = STATUS_CLOUD_FILE_NOT_SUPPORTED
+    else
+      ack.CompletionStatus = STATUS_SUCCESS
+    end
+
+    if (err = cf.CfExecute(@opInfo, @params))
+      lcCfApiWrapper.Warning("CfExecute failed: %v", err)
+    end
+
+    return 0
+  end
+
+  # cfApiRenameCompletion is the callback of the same name.
+  def cfApiRenameCompletion(callbackInfo, _) # (*cf.CF_CALLBACK_INFO, *cf.CF_CALLBACK_PARAMETERS) -> uintptr
+    logCallback("cfApiRenameCompletion", callbackInfo, nil, nil)
+
+    return 0
+  end
+
+  # cfApiNotifyFileCloseCompletion is the callback of the same name.
+  def cfApiNotifyFileCloseCompletion(callbackInfo, _) # (*cf.CF_CALLBACK_INFO, *cf.CF_CALLBACK_PARAMETERS) -> uintptr
+    logCallback("cfApiNotifyFileCloseCompletion", callbackInfo, nil, nil)
+
+    return 0
+  end
+
+  # The trampolines handed to CfConnectSyncRoot. NewCallback must be called once
+  # per function and not per connection, since each call consumes one of a
+  # process-wide limited number of slots.
+  var cbFetchData = cf.CF_CALLBACK(syscall.NewCallback(cfApiFetchDataCallback))
+  var cbCancelFetchData = cf.CF_CALLBACK(syscall.NewCallback(cfApiCancelFetchData))
+  var cbNotifyFileOpenCompletion = cf.CF_CALLBACK(syscall.NewCallback(cfApiNotifyFileOpenCompletion))
+  var cbNotifyFileCloseCompletion = cf.CF_CALLBACK(syscall.NewCallback(cfApiNotifyFileCloseCompletion))
+  var cbValidateData = cf.CF_CALLBACK(syscall.NewCallback(cfApiValidateData))
+  var cbCancelFetchPlaceHolders = cf.CF_CALLBACK(syscall.NewCallback(cfApiCancelFetchPlaceHolders))
+  var cbRename = cf.CF_CALLBACK(syscall.NewCallback(cfApiRename))
+  var cbRenameCompletion = cf.CF_CALLBACK(syscall.NewCallback(cfApiRenameCompletion))
+
+  # flagsToString stands in for QVariant::fromValue(QFlags(...)) in the log line.
+  def flagsToString(flags) # (cf.CF_CALLBACK_RENAME_FLAGS) -> string
+    var :parts, Array[string]
+
+    if flags & cf.CF_CALLBACK_RENAME_FLAG_IS_DIRECTORY != 0
+      parts = append(parts, "IS_DIRECTORY")
+    end
+
+    if flags & cf.CF_CALLBACK_RENAME_FLAG_SOURCE_IN_SCOPE != 0
+      parts = append(parts, "SOURCE_IN_SCOPE")
+    end
+
+    if flags & cf.CF_CALLBACK_RENAME_FLAG_TARGET_IN_SCOPE != 0
+      parts = append(parts, "TARGET_IN_SCOPE")
+    end
+
+    if len(parts) == 0
+      return "NONE"
+    end
+
+    return strings.Join(parts, "|")
+  end
+
+  # isChildPathOf is FileSystem::isChildPathOf().
+  def isChildPathOf(path, parent) # (string, string) -> bool
+    p = strings.ToLower(filepath.Clean(path))
+    base = strings.ToLower(filepath.Clean(parent))
+
+    if p == base
+      return true
+    end
+
+    return strings.HasPrefix(p, base + string(filepath.Separator))
+  end
+
+  # baseName and parentPath are std::filesystem::path::filename() and
+  # ::parent_path().
+  def baseName(path) # (string) -> string
+    return filepath.Base(path)
+  end
+
+  def parentPath(path) # (string) -> string
+    return filepath.Dir(path)
+  end
+end

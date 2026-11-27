@@ -1,0 +1,18 @@
+require "context"
+require "time"
+
+module Directory
+  def RunPoller(ctx, interval, onChange) # context.Context, time.Duration, func(Event)
+    ticker = time.NewTicker(interval)
+    defer ticker.Stop()
+
+    loop do
+      case
+      when ctx.Done().<<
+        return
+      when ticker.C.<<
+        onChange(Event.new(Kind: Poll))
+      end
+    end
+  end
+end

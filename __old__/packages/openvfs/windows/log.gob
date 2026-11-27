@@ -1,0 +1,39 @@
+#go:build windows
+
+require "github.com/rs/zerolog/log"
+
+module Windows
+  # The Q_LOGGING_CATEGORY declarations of the three cfapi translation units.
+  # Qt filters per category and level at runtime; Enabled does the same job for
+  # the categories declared with a level other than the default.
+
+  var loggingCategory = Struct.new(name: string) do
+    def Debug(format, v) # (string, ...any)
+      log.Debug().Str("category", self.name).Msgf(format, *v)
+    end
+
+    def Info(format, v) # (string, ...any)
+      log.Info().Str("category", self.name).Msgf(format, *v)
+    end
+
+    def Warning(format, v) # (string, ...any)
+      log.Warn().Str("category", self.name).Msgf(format, *v)
+    end
+
+    def Critical(format, v) # (string, ...any)
+      log.Error().Str("category", self.name).Msgf(format, *v)
+    end
+  end
+
+  # Q_LOGGING_CATEGORY(lcCfApi, "sync.vfs.cfapi", QtInfoMsg)
+  var lcCfApi = @loggingCategory.new("sync.vfs.cfapi")
+  # Q_LOGGING_CATEGORY(lcCfApiWrapper, "sync.vfs.cfapi.wrapper", QtDebugMsg)
+  var lcCfApiWrapper = @loggingCategory.new("sync.vfs.cfapi.wrapper")
+  # Q_LOGGING_CATEGORY(lcCfApiHydrationDevice, "sync.vfs.cfapi.hydrationdevice", QtDebugMsg)
+  var lcCfApiHydrationDevice = @loggingCategory.new("sync.vfs.cfapi.hydrationdevice")
+
+  # logWarning is for the few places that warn outside a category.
+  def logWarning(format, v) # (string, ...any)
+    log.Warn().Msgf(format, *v)
+  end
+end

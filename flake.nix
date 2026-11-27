@@ -83,6 +83,7 @@
             fuse3
             libxml2
             bat
+            sqlite
           ];
 
           shellHook = ''

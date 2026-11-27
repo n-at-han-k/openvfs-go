@@ -1,5 +1,6 @@
 require "database/sql"
 require "fmt"
+require "os"
 require "path/filepath"
 require "strings"
 
@@ -633,6 +634,10 @@ module Journal
   end
 
   def Open(path) # (string) -> (*Journal, error)
+    if (err = os.MkdirAll(filepath.Dir(path), 0755))
+      return nil, err
+    end
+
     dsn = "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)"
 
     db, err = sql.Open("sqlite", dsn)

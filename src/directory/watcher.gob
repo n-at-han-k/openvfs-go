@@ -1,11 +1,11 @@
 require "context"
 require "io/fs"
-require "log"
 require "os"
 require "path/filepath"
 require "strings"
 
 require "github.com/fsnotify/fsnotify"
+require "github.com/rs/zerolog/log"
 
 module Directory
   var EventKind = Class.new(uint8) do
@@ -86,7 +86,7 @@ module Directory
             return
           end
 
-          log.Printf("fsnotify: %v", err)
+          log.Warn().Err(err).Msg("fsnotify")
           self.onChange(Event.new(Kind: Poll))
         end
       end
@@ -115,7 +115,7 @@ module Directory
 
         if err == nil && st.IsDir()
           if (err = self.addTree(ev.Name))
-            log.Printf("watch %s: %v", ev.Name, err)
+            log.Warn().Err(err).Msgf("watch %s", ev.Name)
             self.onChange(Event.new(Kind: Poll))
           end
         end
@@ -188,7 +188,7 @@ module Directory
   def RunWatcher(ctx, root, ignored, onChange) # context.Context, string, func(string) bool, func(Event)
     w, err = fsnotify.NewWatcher()
     if err
-      log.Printf("fsnotify: %v", err)
+      log.Warn().Err(err).Msg("fsnotify")
       return
     end
 
@@ -203,7 +203,7 @@ module Directory
     )
 
     if (err = r.addTree(root))
-      log.Printf("watch %s: %v", root, err)
+      log.Warn().Err(err).Msgf("watch %s", root)
       return
     end
 

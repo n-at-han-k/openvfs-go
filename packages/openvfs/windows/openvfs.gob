@@ -1,9 +1,9 @@
 #go:build windows
 
 require "context"
-require "log"
 
 require "example.com/project/src/directory"
+require "github.com/rs/zerolog/log"
 
 module Windows
   # The entry points the openvfs package dispatches to. The cloud filter has no
@@ -12,17 +12,18 @@ module Windows
 
   # Run reports that the fuse filesystem has no Windows counterpart.
   def Run(ctx, root, owner, socketPath, onChange) # context.Context, string, string, string, func(directory.Event)
-    log.Printf("openvfs: the fuse filesystem is not available on Windows; the cloud filter is the provider")
+    log.Info().Msg("openvfs: the fuse filesystem is not available on Windows; the cloud filter is the provider")
   end
 
   # ServeAPI reports that the socket API has no Windows counterpart.
-  def ServeAPI(ctx, socketPath, onChange) # context.Context, string, func(directory.Event)
-    log.Printf("openvfs: the socket API is not available on Windows; the cloud filter has no such protocol")
+  def ServeAPI(ctx, socketPath, onChange) # (context.Context, string, func(directory.Event)) -> error
+    log.Info().Msg("openvfs: the socket API is not available on Windows; the cloud filter has no such protocol")
+    return nil
   end
 
   # Main reports that the openvfsfuse daemon has no Windows counterpart.
   def Main(ctx, argv) # (context.Context, []string) -> int
-    log.Printf("openvfs: the fuse daemon is not available on Windows")
+    log.Info().Msg("openvfs: the fuse daemon is not available on Windows")
 
     return -1
   end
@@ -30,7 +31,7 @@ module Windows
   # RunStat reports that vfsstat has no Windows counterpart, because placeholder
   # state there belongs to the cloud filter rather than to extended attributes.
   def RunStat(argv) # ([]string) -> int
-    log.Printf("openvfs_stat: placeholder state on Windows is owned by the cloud filter")
+    log.Info().Msg("openvfs_stat: placeholder state on Windows is owned by the cloud filter")
 
     return -1
   end

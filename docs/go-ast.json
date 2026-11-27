@@ -1,0 +1,1759 @@
+[
+  {
+    "name": "Filter",
+    "kind": "func(string) bool"
+  },
+  {
+    "name": "MergeMode",
+    "kind": "uint"
+  },
+  {
+    "name": "Scope",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "Outer",
+        "type": "*Scope"
+      },
+      {
+        "name": "Objects",
+        "type": "map[string]*Object"
+      }
+    ],
+    "markers": [
+      "Lookup",
+      "Insert",
+      "String"
+    ]
+  },
+  {
+    "name": "Object",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "Kind",
+        "type": "ObjKind"
+      },
+      {
+        "name": "Name",
+        "type": "string"
+      },
+      {
+        "name": "Decl",
+        "type": "any"
+      },
+      {
+        "name": "Data",
+        "type": "any"
+      },
+      {
+        "name": "Type",
+        "type": "any"
+      }
+    ],
+    "markers": [
+      "Pos"
+    ]
+  },
+  {
+    "name": "ObjKind",
+    "kind": "int",
+    "markers": [
+      "String"
+    ]
+  },
+  {
+    "name": "Visitor",
+    "kind": "interface",
+    "methods": [
+      "Visit"
+    ]
+  },
+  {
+    "name": "inspector",
+    "kind": "func(Node) bool",
+    "markers": [
+      "Visit"
+    ]
+  },
+  {
+    "name": "CommentMap",
+    "kind": "map[Node][]*CommentGroup",
+    "markers": [
+      "addComment",
+      "Update",
+      "Filter",
+      "Comments",
+      "String"
+    ]
+  },
+  {
+    "name": "commentListReader",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "fset",
+        "type": "*token.FileSet"
+      },
+      {
+        "name": "list",
+        "type": "[]*CommentGroup"
+      },
+      {
+        "name": "index",
+        "type": "int"
+      },
+      {
+        "name": "comment",
+        "type": "*CommentGroup"
+      },
+      {
+        "name": "pos",
+        "type": "token.Position"
+      },
+      {
+        "name": "end",
+        "type": "token.Position"
+      }
+    ],
+    "markers": [
+      "eol",
+      "next"
+    ]
+  },
+  {
+    "name": "nodeStack",
+    "kind": "[]Node",
+    "markers": [
+      "push",
+      "pop"
+    ]
+  },
+  {
+    "name": "Directive",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "Tool",
+        "type": "string"
+      },
+      {
+        "name": "Name",
+        "type": "string"
+      },
+      {
+        "name": "Args",
+        "type": "string"
+      },
+      {
+        "name": "Slash",
+        "type": "token.Pos"
+      },
+      {
+        "name": "ArgsPos",
+        "type": "token.Pos"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "ParseArgs"
+    ]
+  },
+  {
+    "name": "DirectiveArg",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "Arg",
+        "type": "string"
+      },
+      {
+        "name": "Pos",
+        "type": "token.Pos"
+      }
+    ]
+  },
+  {
+    "name": "directiveScanner",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "str",
+        "type": "string"
+      },
+      {
+        "name": "pos",
+        "type": "token.Pos"
+      }
+    ],
+    "markers": [
+      "skip",
+      "take",
+      "takeNonSpace",
+      "skipSpace"
+    ]
+  },
+  {
+    "name": "posSpan",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "Start",
+        "type": "token.Pos"
+      },
+      {
+        "name": "End",
+        "type": "token.Pos"
+      }
+    ]
+  },
+  {
+    "name": "cgPos",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "left",
+        "type": "bool"
+      },
+      {
+        "name": "cg",
+        "type": "*CommentGroup"
+      }
+    ]
+  },
+  {
+    "name": "FieldFilter",
+    "kind": "func(name string, value reflect.Value) bool"
+  },
+  {
+    "name": "printer",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "output",
+        "type": "io.Writer"
+      },
+      {
+        "name": "fset",
+        "type": "*token.FileSet"
+      },
+      {
+        "name": "filter",
+        "type": "FieldFilter"
+      },
+      {
+        "name": "ptrmap",
+        "type": "map[any]int"
+      },
+      {
+        "name": "indent",
+        "type": "int"
+      },
+      {
+        "name": "last",
+        "type": "byte"
+      },
+      {
+        "name": "line",
+        "type": "int"
+      }
+    ],
+    "markers": [
+      "Write",
+      "printf",
+      "print"
+    ]
+  },
+  {
+    "name": "localError",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "err",
+        "type": "error"
+      }
+    ]
+  },
+  {
+    "name": "pkgBuilder",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "fset",
+        "type": "*token.FileSet"
+      },
+      {
+        "name": "errors",
+        "type": "scanner.ErrorList"
+      }
+    ],
+    "markers": [
+      "error",
+      "errorf",
+      "declare"
+    ]
+  },
+  {
+    "name": "Importer",
+    "kind": "func(imports map[string]*Object, path string) (pkg *Object, err error)"
+  },
+  {
+    "name": "Node",
+    "kind": "interface",
+    "methods": [
+      "Pos",
+      "End"
+    ]
+  },
+  {
+    "name": "Expr",
+    "kind": "interface",
+    "methods": [
+      "exprNode"
+    ]
+  },
+  {
+    "name": "Stmt",
+    "kind": "interface",
+    "methods": [
+      "stmtNode"
+    ]
+  },
+  {
+    "name": "Decl",
+    "kind": "interface",
+    "methods": [
+      "declNode"
+    ]
+  },
+  {
+    "name": "Comment",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "Slash",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Text",
+        "type": "string"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End"
+    ]
+  },
+  {
+    "name": "CommentGroup",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "List",
+        "type": "[]*Comment"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "Text"
+    ]
+  },
+  {
+    "name": "Field",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "Doc",
+        "type": "*CommentGroup"
+      },
+      {
+        "name": "Names",
+        "type": "[]*Ident"
+      },
+      {
+        "name": "Type",
+        "type": "Expr"
+      },
+      {
+        "name": "Tag",
+        "type": "*BasicLit"
+      },
+      {
+        "name": "Comment",
+        "type": "*CommentGroup"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End"
+    ]
+  },
+  {
+    "name": "FieldList",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "Opening",
+        "type": "token.Pos"
+      },
+      {
+        "name": "List",
+        "type": "[]*Field"
+      },
+      {
+        "name": "Closing",
+        "type": "token.Pos"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "NumFields"
+    ]
+  },
+  {
+    "name": "BadExpr",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "From",
+        "type": "token.Pos"
+      },
+      {
+        "name": "To",
+        "type": "token.Pos"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "exprNode"
+    ]
+  },
+  {
+    "name": "Ident",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "NamePos",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Name",
+        "type": "string"
+      },
+      {
+        "name": "Obj",
+        "type": "*Object"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "exprNode",
+      "IsExported",
+      "String"
+    ]
+  },
+  {
+    "name": "Ellipsis",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "Ellipsis",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Elt",
+        "type": "Expr"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "exprNode"
+    ]
+  },
+  {
+    "name": "BasicLit",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "ValuePos",
+        "type": "token.Pos"
+      },
+      {
+        "name": "ValueEnd",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Kind",
+        "type": "token.Token"
+      },
+      {
+        "name": "Value",
+        "type": "string"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "exprNode"
+    ]
+  },
+  {
+    "name": "FuncLit",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "Type",
+        "type": "*FuncType"
+      },
+      {
+        "name": "Body",
+        "type": "*BlockStmt"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "exprNode"
+    ]
+  },
+  {
+    "name": "CompositeLit",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "Type",
+        "type": "Expr"
+      },
+      {
+        "name": "Lbrace",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Elts",
+        "type": "[]Expr"
+      },
+      {
+        "name": "Rbrace",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Incomplete",
+        "type": "bool"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "exprNode"
+    ]
+  },
+  {
+    "name": "ParenExpr",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "Lparen",
+        "type": "token.Pos"
+      },
+      {
+        "name": "X",
+        "type": "Expr"
+      },
+      {
+        "name": "Rparen",
+        "type": "token.Pos"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "exprNode"
+    ]
+  },
+  {
+    "name": "SelectorExpr",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "X",
+        "type": "Expr"
+      },
+      {
+        "name": "Sel",
+        "type": "*Ident"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "exprNode"
+    ]
+  },
+  {
+    "name": "IndexExpr",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "X",
+        "type": "Expr"
+      },
+      {
+        "name": "Lbrack",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Index",
+        "type": "Expr"
+      },
+      {
+        "name": "Rbrack",
+        "type": "token.Pos"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "exprNode"
+    ]
+  },
+  {
+    "name": "IndexListExpr",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "X",
+        "type": "Expr"
+      },
+      {
+        "name": "Lbrack",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Indices",
+        "type": "[]Expr"
+      },
+      {
+        "name": "Rbrack",
+        "type": "token.Pos"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "exprNode"
+    ]
+  },
+  {
+    "name": "SliceExpr",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "X",
+        "type": "Expr"
+      },
+      {
+        "name": "Lbrack",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Low",
+        "type": "Expr"
+      },
+      {
+        "name": "High",
+        "type": "Expr"
+      },
+      {
+        "name": "Max",
+        "type": "Expr"
+      },
+      {
+        "name": "Slice3",
+        "type": "bool"
+      },
+      {
+        "name": "Rbrack",
+        "type": "token.Pos"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "exprNode"
+    ]
+  },
+  {
+    "name": "TypeAssertExpr",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "X",
+        "type": "Expr"
+      },
+      {
+        "name": "Lparen",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Type",
+        "type": "Expr"
+      },
+      {
+        "name": "Rparen",
+        "type": "token.Pos"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "exprNode"
+    ]
+  },
+  {
+    "name": "CallExpr",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "Fun",
+        "type": "Expr"
+      },
+      {
+        "name": "Lparen",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Args",
+        "type": "[]Expr"
+      },
+      {
+        "name": "Ellipsis",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Rparen",
+        "type": "token.Pos"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "exprNode"
+    ]
+  },
+  {
+    "name": "StarExpr",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "Star",
+        "type": "token.Pos"
+      },
+      {
+        "name": "X",
+        "type": "Expr"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "exprNode"
+    ]
+  },
+  {
+    "name": "UnaryExpr",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "OpPos",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Op",
+        "type": "token.Token"
+      },
+      {
+        "name": "X",
+        "type": "Expr"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "exprNode"
+    ]
+  },
+  {
+    "name": "BinaryExpr",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "X",
+        "type": "Expr"
+      },
+      {
+        "name": "OpPos",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Op",
+        "type": "token.Token"
+      },
+      {
+        "name": "Y",
+        "type": "Expr"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "exprNode"
+    ]
+  },
+  {
+    "name": "KeyValueExpr",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "Key",
+        "type": "Expr"
+      },
+      {
+        "name": "Colon",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Value",
+        "type": "Expr"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "exprNode"
+    ]
+  },
+  {
+    "name": "ChanDir",
+    "kind": "int"
+  },
+  {
+    "name": "ArrayType",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "Lbrack",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Len",
+        "type": "Expr"
+      },
+      {
+        "name": "Elt",
+        "type": "Expr"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "exprNode"
+    ]
+  },
+  {
+    "name": "StructType",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "Struct",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Fields",
+        "type": "*FieldList"
+      },
+      {
+        "name": "Incomplete",
+        "type": "bool"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "exprNode"
+    ]
+  },
+  {
+    "name": "FuncType",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "Func",
+        "type": "token.Pos"
+      },
+      {
+        "name": "TypeParams",
+        "type": "*FieldList"
+      },
+      {
+        "name": "Params",
+        "type": "*FieldList"
+      },
+      {
+        "name": "Results",
+        "type": "*FieldList"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "exprNode"
+    ]
+  },
+  {
+    "name": "InterfaceType",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "Interface",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Methods",
+        "type": "*FieldList"
+      },
+      {
+        "name": "Incomplete",
+        "type": "bool"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "exprNode"
+    ]
+  },
+  {
+    "name": "MapType",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "Map",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Key",
+        "type": "Expr"
+      },
+      {
+        "name": "Value",
+        "type": "Expr"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "exprNode"
+    ]
+  },
+  {
+    "name": "ChanType",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "Begin",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Arrow",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Dir",
+        "type": "ChanDir"
+      },
+      {
+        "name": "Value",
+        "type": "Expr"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "exprNode"
+    ]
+  },
+  {
+    "name": "BadStmt",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "From",
+        "type": "token.Pos"
+      },
+      {
+        "name": "To",
+        "type": "token.Pos"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "stmtNode"
+    ]
+  },
+  {
+    "name": "DeclStmt",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "Decl",
+        "type": "Decl"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "stmtNode"
+    ]
+  },
+  {
+    "name": "EmptyStmt",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "Semicolon",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Implicit",
+        "type": "bool"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "stmtNode"
+    ]
+  },
+  {
+    "name": "LabeledStmt",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "Label",
+        "type": "*Ident"
+      },
+      {
+        "name": "Colon",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Stmt",
+        "type": "Stmt"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "stmtNode"
+    ]
+  },
+  {
+    "name": "ExprStmt",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "X",
+        "type": "Expr"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "stmtNode"
+    ]
+  },
+  {
+    "name": "SendStmt",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "Chan",
+        "type": "Expr"
+      },
+      {
+        "name": "Arrow",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Value",
+        "type": "Expr"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "stmtNode"
+    ]
+  },
+  {
+    "name": "IncDecStmt",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "X",
+        "type": "Expr"
+      },
+      {
+        "name": "TokPos",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Tok",
+        "type": "token.Token"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "stmtNode"
+    ]
+  },
+  {
+    "name": "AssignStmt",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "Lhs",
+        "type": "[]Expr"
+      },
+      {
+        "name": "TokPos",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Tok",
+        "type": "token.Token"
+      },
+      {
+        "name": "Rhs",
+        "type": "[]Expr"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "stmtNode"
+    ]
+  },
+  {
+    "name": "GoStmt",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "Go",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Call",
+        "type": "*CallExpr"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "stmtNode"
+    ]
+  },
+  {
+    "name": "DeferStmt",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "Defer",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Call",
+        "type": "*CallExpr"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "stmtNode"
+    ]
+  },
+  {
+    "name": "ReturnStmt",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "Return",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Results",
+        "type": "[]Expr"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "stmtNode"
+    ]
+  },
+  {
+    "name": "BranchStmt",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "TokPos",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Tok",
+        "type": "token.Token"
+      },
+      {
+        "name": "Label",
+        "type": "*Ident"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "stmtNode"
+    ]
+  },
+  {
+    "name": "BlockStmt",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "Lbrace",
+        "type": "token.Pos"
+      },
+      {
+        "name": "List",
+        "type": "[]Stmt"
+      },
+      {
+        "name": "Rbrace",
+        "type": "token.Pos"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "stmtNode"
+    ]
+  },
+  {
+    "name": "IfStmt",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "If",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Init",
+        "type": "Stmt"
+      },
+      {
+        "name": "Cond",
+        "type": "Expr"
+      },
+      {
+        "name": "Body",
+        "type": "*BlockStmt"
+      },
+      {
+        "name": "Else",
+        "type": "Stmt"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "stmtNode"
+    ]
+  },
+  {
+    "name": "CaseClause",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "Case",
+        "type": "token.Pos"
+      },
+      {
+        "name": "List",
+        "type": "[]Expr"
+      },
+      {
+        "name": "Colon",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Body",
+        "type": "[]Stmt"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "stmtNode"
+    ]
+  },
+  {
+    "name": "SwitchStmt",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "Switch",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Init",
+        "type": "Stmt"
+      },
+      {
+        "name": "Tag",
+        "type": "Expr"
+      },
+      {
+        "name": "Body",
+        "type": "*BlockStmt"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "stmtNode"
+    ]
+  },
+  {
+    "name": "TypeSwitchStmt",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "Switch",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Init",
+        "type": "Stmt"
+      },
+      {
+        "name": "Assign",
+        "type": "Stmt"
+      },
+      {
+        "name": "Body",
+        "type": "*BlockStmt"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "stmtNode"
+    ]
+  },
+  {
+    "name": "CommClause",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "Case",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Comm",
+        "type": "Stmt"
+      },
+      {
+        "name": "Colon",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Body",
+        "type": "[]Stmt"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "stmtNode"
+    ]
+  },
+  {
+    "name": "SelectStmt",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "Select",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Body",
+        "type": "*BlockStmt"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "stmtNode"
+    ]
+  },
+  {
+    "name": "ForStmt",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "For",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Init",
+        "type": "Stmt"
+      },
+      {
+        "name": "Cond",
+        "type": "Expr"
+      },
+      {
+        "name": "Post",
+        "type": "Stmt"
+      },
+      {
+        "name": "Body",
+        "type": "*BlockStmt"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "stmtNode"
+    ]
+  },
+  {
+    "name": "RangeStmt",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "For",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Key",
+        "type": "Expr"
+      },
+      {
+        "name": "Value",
+        "type": "Expr"
+      },
+      {
+        "name": "TokPos",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Tok",
+        "type": "token.Token"
+      },
+      {
+        "name": "Range",
+        "type": "token.Pos"
+      },
+      {
+        "name": "X",
+        "type": "Expr"
+      },
+      {
+        "name": "Body",
+        "type": "*BlockStmt"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "stmtNode"
+    ]
+  },
+  {
+    "name": "Spec",
+    "kind": "interface",
+    "methods": [
+      "specNode"
+    ]
+  },
+  {
+    "name": "ImportSpec",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "Doc",
+        "type": "*CommentGroup"
+      },
+      {
+        "name": "Name",
+        "type": "*Ident"
+      },
+      {
+        "name": "Path",
+        "type": "*BasicLit"
+      },
+      {
+        "name": "Comment",
+        "type": "*CommentGroup"
+      },
+      {
+        "name": "EndPos",
+        "type": "token.Pos"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "specNode"
+    ]
+  },
+  {
+    "name": "ValueSpec",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "Doc",
+        "type": "*CommentGroup"
+      },
+      {
+        "name": "Names",
+        "type": "[]*Ident"
+      },
+      {
+        "name": "Type",
+        "type": "Expr"
+      },
+      {
+        "name": "Values",
+        "type": "[]Expr"
+      },
+      {
+        "name": "Comment",
+        "type": "*CommentGroup"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "specNode"
+    ]
+  },
+  {
+    "name": "TypeSpec",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "Doc",
+        "type": "*CommentGroup"
+      },
+      {
+        "name": "Name",
+        "type": "*Ident"
+      },
+      {
+        "name": "TypeParams",
+        "type": "*FieldList"
+      },
+      {
+        "name": "Assign",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Type",
+        "type": "Expr"
+      },
+      {
+        "name": "Comment",
+        "type": "*CommentGroup"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "specNode"
+    ]
+  },
+  {
+    "name": "BadDecl",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "From",
+        "type": "token.Pos"
+      },
+      {
+        "name": "To",
+        "type": "token.Pos"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "declNode"
+    ]
+  },
+  {
+    "name": "GenDecl",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "Doc",
+        "type": "*CommentGroup"
+      },
+      {
+        "name": "TokPos",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Tok",
+        "type": "token.Token"
+      },
+      {
+        "name": "Lparen",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Specs",
+        "type": "[]Spec"
+      },
+      {
+        "name": "Rparen",
+        "type": "token.Pos"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "declNode"
+    ]
+  },
+  {
+    "name": "FuncDecl",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "Doc",
+        "type": "*CommentGroup"
+      },
+      {
+        "name": "Recv",
+        "type": "*FieldList"
+      },
+      {
+        "name": "Name",
+        "type": "*Ident"
+      },
+      {
+        "name": "Type",
+        "type": "*FuncType"
+      },
+      {
+        "name": "Body",
+        "type": "*BlockStmt"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End",
+      "declNode"
+    ]
+  },
+  {
+    "name": "File",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "Doc",
+        "type": "*CommentGroup"
+      },
+      {
+        "name": "Package",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Name",
+        "type": "*Ident"
+      },
+      {
+        "name": "Decls",
+        "type": "[]Decl"
+      },
+      {
+        "name": "FileStart",
+        "type": "token.Pos"
+      },
+      {
+        "name": "FileEnd",
+        "type": "token.Pos"
+      },
+      {
+        "name": "Scope",
+        "type": "*Scope"
+      },
+      {
+        "name": "Imports",
+        "type": "[]*ImportSpec"
+      },
+      {
+        "name": "Unresolved",
+        "type": "[]*Ident"
+      },
+      {
+        "name": "Comments",
+        "type": "[]*CommentGroup"
+      },
+      {
+        "name": "GoVersion",
+        "type": "string"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End"
+    ]
+  },
+  {
+    "name": "Package",
+    "kind": "struct",
+    "fields": [
+      {
+        "name": "Name",
+        "type": "string"
+      },
+      {
+        "name": "Scope",
+        "type": "*Scope"
+      },
+      {
+        "name": "Imports",
+        "type": "map[string]*Object"
+      },
+      {
+        "name": "Files",
+        "type": "map[string]*File"
+      }
+    ],
+    "markers": [
+      "Pos",
+      "End"
+    ]
+  }
+]

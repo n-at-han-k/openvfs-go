@@ -40,8 +40,8 @@ module Unix
 
     protected def ToData # () -> ([]byte, error)
       return toMsgpack(Hash[string, any].new(
-        RegistrationOwner.String() => self.Owner,
-        RegistrationVersion.String() => self.Version
+        "owner" => self.Owner,
+        "version" => self.Version
       ))
     end
   end

@@ -1,0 +1,12 @@
+#go:build linux
+
+require "example.com/project/packages/openvfs/unix/linux"
+
+module Openvfs
+  # On Linux the filesystem is openvfsfuse, in packages/openvfs/unix/linux.
+
+  var run = linux.Run
+  var serveAPI = linux.ServeAPI
+  var mainCmd = linux.Main
+  var runStat = linux.RunStat
+end

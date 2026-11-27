@@ -1,0 +1,91 @@
+#go:build linux || darwin
+
+require "errors"
+
+require "github.com/hanwen/go-fuse/v2/fuse", gofuse
+require "golang.org/x/sys/unix"
+
+module Unix
+  # Platform is the set of operations that differ between Linux and macOS.
+  #
+  # Upstream expresses these with #ifdef __APPLE__ inside one translation unit.
+  # Here the shared layer is one package and each OS is its own, so the OS
+  # package fills this table at init and the shared code calls through it. The
+  # call sites are unchanged from the straight translation -- the names below are
+  # the same functions the C++ calls, they are just variables now.
+  class Platform
+    # Xattr*, the l*xattr family: no following of a final symlink.
+    attr_accessor :XattrGet, Proc[string, string, Array[byte], [int, error]]
+    attr_accessor :XattrSet, Proc[string, string, Array[byte], int, [error]]
+    attr_accessor :XattrList, Proc[string, Array[byte], [int, error]]
+    attr_accessor :XattrRemove, Proc[string, string, [error]]
+
+    # IsErrNoAttr reports a missing attribute: ENODATA on Linux, ENOATTR on
+    # macOS.
+    attr_accessor :IsErrNoAttr, Proc[error, [bool]]
+
+    # CallerName is getcallername(): /proc/<pid>/exe on Linux, KERN_PROCARGS2
+    # on macOS.
+    attr_accessor :CallerName, Proc[uint32, [string]]
+    # CallerIsThreadOfProcess answers the /proc/<pid>/task/<tid> question,
+    # which upstream short circuits to false under __APPLE__.
+    attr_accessor :CallerIsThreadOfProcess, Proc[uint32, int64, [bool]]
+
+    # StatMode widens st_mode, which is 32 bit on Linux and 16 bit on macOS.
+    attr_accessor :StatMode, Proc[@@unix.Stat_t, [uint32]]
+    # FillStatfs maps struct statfs onto the fuse reply; macOS carries neither
+    # f_namemax nor f_frsize.
+    attr_accessor :FillStatfs, Proc[@@gofuse.StatfsOut, @@unix.Statfs_t]
+    # MknodAt and MkfifoAt stand in for the syscalls macOS does not have.
+    attr_accessor :MknodAt, Proc[int, string, uint32, uint32, [error]]
+    attr_accessor :MkfifoAt, Proc[int, string, uint32, [error]]
+
+    # LogToSyslog mirrors a log line into syslog, which upstream does on
+    # everything but Apple.
+    attr_accessor :LogToSyslog, Proc[string]
+  end
+
+  # The shared layer calls these under the names the C++ uses.
+
+  var :xattrGet, Proc[string, string, Array[byte], [int, error]]
+  var :xattrSet, Proc[string, string, Array[byte], int, [error]]
+  var :xattrList, Proc[string, Array[byte], [int, error]]
+  var :xattrRemove, Proc[string, string, [error]]
+  var :isErrNoAttr, Proc[error, [bool]]
+  var :getcallernameByPid, Proc[uint32, [string]]
+  var :callerIsThreadOfProcess, Proc[uint32, int64, [bool]]
+  var :statMode, Proc[@@unix.Stat_t, [uint32]]
+  var :fillStatfs, Proc[@@gofuse.StatfsOut, @@unix.Statfs_t]
+  var :mknodAt, Proc[int, string, uint32, uint32, [error]]
+  var :mkfifoAt, Proc[int, string, uint32, [error]]
+  var :logToSyslog, Proc[string]
+
+  # platformInstalled reports whether SetPlatform has run. Every entry point
+  # checks it, so importing this package without its OS half fails with a clear
+  # error rather than a nil call deep inside a fuse callback.
+  def platformInstalled # () -> bool
+    return xattrGet != nil
+  end
+
+  # errNoPlatform is returned by the entry points when the OS half is missing.
+  var errNoPlatform = errors.New(
+    "openvfs: no platform installed; import example.com/project/packages/unix/linux or .../darwin")
+
+  # SetPlatform installs the OS specific half of the backend. The linux and
+  # darwin packages call it from init(), so importing one of them is what makes
+  # this package usable.
+  def SetPlatform(p) # (Platform)
+    xattrGet = p.XattrGet
+    xattrSet = p.XattrSet
+    xattrList = p.XattrList
+    xattrRemove = p.XattrRemove
+    isErrNoAttr = p.IsErrNoAttr
+    getcallernameByPid = p.CallerName
+    callerIsThreadOfProcess = p.CallerIsThreadOfProcess
+    statMode = p.StatMode
+    fillStatfs = p.FillStatfs
+    mknodAt = p.MknodAt
+    mkfifoAt = p.MkfifoAt
+    logToSyslog = p.LogToSyslog
+  end
+end

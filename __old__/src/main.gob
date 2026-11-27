@@ -1,0 +1,168 @@
+require "context"
+require "os"
+require "os/signal"
+require "path/filepath"
+require "strings"
+require "syscall"
+require "time"
+
+require "example.com/project/packages/openvfs"
+require "example.com/project/src/directory"
+require "example.com/project/src/journal"
+require "github.com/knadh/koanf/parsers/yaml"
+require "github.com/knadh/koanf/providers/env"
+require "github.com/knadh/koanf/providers/file"
+require "github.com/knadh/koanf/v2"
+require "github.com/rs/zerolog"
+require "github.com/rs/zerolog/log"
+require "github.com/spf13/cobra"
+
+module Main
+  var k = koanf.New(".")
+
+  def loadConfig(configPath) # (string)
+    if configPath != ""
+      if (err = k.Load(file.Provider(configPath), yaml.Parser()))
+        log.Warn().Err(err).Msgf("load config %s", configPath)
+      end
+    end
+
+    k.Load(env.Provider("OPENVFS_", ".", lambda { |s| # (string) -> string
+      return strings.ReplaceAll(strings.ToLower(strings.TrimPrefix(s, "OPENVFS_")), "_", ".")
+    }), nil)
+  end
+
+  def run(root, dbPath, socketPath) # (string, string, string)
+    ignored = lambda { |rel| # (string) -> bool
+      return rel == dbPath || rel == dbPath + "-wal" || rel == dbPath + "-shm"
+    }
+
+    ctx, cancel = signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+    defer cancel()
+
+    events = make(Chan[directory.Event], 256)
+
+    journal, err = journal.Open(filepath.Join(root, dbPath))
+    if err
+      log.Fatal().Err(err).Msg("open journal")
+    end
+
+    defer journal.Close()
+
+    syncer = directory.NewSyncer(root, ignored, journal, lambda { |event| # (directory.Event)
+      case
+      when events << event
+      when ctx.Done().<<
+      end
+    })
+
+    go syncer.Run(ctx)
+
+    if (err = openvfs.ServeAPI(ctx, socketPath, lambda { |event| # (directory.Event)
+      case
+      when events << event
+      when ctx.Done().<<
+      end
+    }))
+      log.Fatal().Err(err).Msg("serve api")
+    end
+
+    go openvfs.Run(ctx, root, "openvfs:local", socketPath, lambda { |event| # (directory.Event)
+      case
+      when events << event
+      when ctx.Done().<<
+      end
+    })
+
+    go directory.RunWatcher(ctx, root, ignored, lambda { |event| # (directory.Event)
+      case
+      when events << event
+      when ctx.Done().<<
+      end
+    })
+
+    go directory.RunPoller(ctx, 30 * time.Second, lambda { |event| # (directory.Event)
+      case
+      when events << event
+      when ctx.Done().<<
+      end
+    })
+
+    loop do
+      case
+      when ctx.Done().<<
+        return
+      when event = events.<<
+        if event.Kind == directory.Poll
+          syncer.Request(directory.SyncRequest.new(Cause: event))
+          next
+        end
+
+        case event.Kind
+        when directory.Create
+        when directory.Write
+        when directory.Remove
+        when directory.Rename
+        when directory.Chmod
+        when directory.LocalEntry
+        end
+      end
+    end
+  end
+
+  def main # ()
+    log.Logger = log.Output(zerolog.ConsoleWriter.new(Out: os.Stderr, TimeFormat: time.RFC3339))
+
+    rootCmd = @cobra.Command.new(
+      Use: "openvfs",
+      Short: "OpenVFS sync client",
+      RunE: lambda { |cmd, args| # (*cobra.Command, []string) -> error
+        configPath, _ = cmd.Flags().GetString("config")
+        loadConfig(configPath)
+
+        root = k.String("root")
+        if root == ""
+          root = "."
+        end
+        if len(args) > 0
+          root = args[0]
+        end
+        flagRoot, _ = cmd.Flags().GetString("root")
+        if flagRoot != ""
+          root = flagRoot
+        end
+
+        dbPath = k.String("db")
+        if dbPath == ""
+          dbPath = "sync-journal.db"
+        end
+        flagDB, _ = cmd.Flags().GetString("db")
+        if flagDB != ""
+          dbPath = flagDB
+        end
+
+        socketPath = k.String("socket")
+        if socketPath == ""
+          socketPath = filepath.Join(os.TempDir(), "openvfs.sock")
+        end
+        flagSocket, _ = cmd.Flags().GetString("socket")
+        if flagSocket != ""
+          socketPath = flagSocket
+        end
+
+        log.Info().Str("root", root).Str("db", dbPath).Str("socket", socketPath).Msg("starting openvfs")
+        run(root, dbPath, socketPath)
+        return nil
+      }
+    )
+
+    rootCmd.Flags().String("config", "", "path to config file (yaml)")
+    rootCmd.Flags().String("root", "", "sync root directory")
+    rootCmd.Flags().String("db", "", "journal database path")
+    rootCmd.Flags().String("socket", "", "socket path")
+
+    if (err = rootCmd.Execute())
+      log.Fatal().Err(err).Msg("command failed")
+    end
+  end
+end

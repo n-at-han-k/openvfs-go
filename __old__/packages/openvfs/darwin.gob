@@ -1,0 +1,12 @@
+#go:build darwin
+
+require "example.com/project/packages/openvfs/unix/darwin"
+
+module Openvfs
+  # On macOS the filesystem is openvfsfuse, in packages/openvfs/unix/darwin.
+
+  var run = darwin.Run
+  var serveAPI = darwin.ServeAPI
+  var mainCmd = darwin.Main
+  var runStat = darwin.RunStat
+end

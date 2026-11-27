@@ -1,0 +1,569 @@
+require "bytes"
+require "encoding/json"
+require "errors"
+require "fmt"
+require "io"
+require "net"
+require "os"
+require "strconv"
+require "strings"
+require "sync"
+require "time"
+
+module Unix
+  # Transpiled from src/openvfsfuse/socketthread.{h,cpp}.
+  #
+  # @see https://www.codeproject.com/Articles/1169105/Cplusplus-std-thread-Event-Loop-with-Message-Queue
+  # David Lafreniere, Feb 2017.
+  #
+  # Upstream drives a raw non-blocking AF_UNIX descriptor and polls it from a
+  # 250ms timer. A net.Conn with a short read deadline behaves the same way -- a
+  # read returns what is buffered, or reports a timeout the way EAGAIN does --
+  # and it is the same code on Linux, macOS and Windows, which has had AF_UNIX
+  # since Windows 10 1803.
+
+  MSG_EXIT_THREAD = 1
+  MSG_POST_USER_DATA = 2
+  MSG_TIMER = 3
+
+  # maxRxBufferSize is the upper bound for the receive buffer. A message from the
+  # socket API is a single JSON line and stays far below this; anything larger
+  # means the peer is not speaking the protocol.
+  MAX_RX_BUFFER_SIZE = 1024 * 100
+  SINGLE_READ_BUFFER_SIZE = 1024 * 4
+
+  # readPollTimeout is how long a poll of the socket waits before reporting that
+  # nothing is there. It stands in for the EAGAIN of upstream's O_NONBLOCK
+  # descriptor and only has to be long enough for the read to be attempted.
+  READ_POLL_TIMEOUT = time.Millisecond
+
+  var MsgData = Struct.new(
+    Msg: string,
+    File: string,
+    FileID: string,
+    ID: int,
+    Requester: string
+  )
+
+  var threadMsg = Struct.new(
+    id: int,
+    msg: @@MsgData
+  )
+
+  # sendArguments and sendMessage are socketSendMsg's function-local anonymous
+  # structs; Gob needs named types for them.
+  #
+  # nlohmann orders object keys, so "arguments" precedes "id" on the wire.
+  var sendArguments = Struct.new(
+    # `json:"file"`
+    File: string,
+    # `json:"fileId"`
+    FileID: string,
+    # `json:"requester"`
+    Requester: string
+  )
+
+  var sendMessage = Struct.new(
+    # `json:"arguments"`
+    Arguments: sendArguments,
+    # `json:"id"`
+    ID: string
+  )
+
+  # hydrateResult is handleReceivedMsg's function-local anonymous struct.
+  var hydrateResult = Struct.new(
+    # `json:"id"`
+    ID: string,
+    # `json:"arguments"`
+    Arguments: json.RawMessage
+  )
+
+  class SocketThread
+    attr_accessor :mu, sync.Mutex
+    attr_accessor :cv, @@sync.Cond
+    attr_accessor :queue, Array[threadMsg]
+
+    # running stands in for m_thread: set while a worker goroutine exists.
+    attr_accessor :running, bool
+    # m_exit
+    attr_accessor :exit, bool
+    # m_timerExit
+    attr_accessor :timerExit, bool
+
+    attr_accessor :threadName, string
+    attr_accessor :socketPath, string
+
+    # done and timerDone replace std::thread::join().
+    attr_accessor :done, Chan[Struct[]]
+    attr_accessor :timerDone, Chan[Struct[]]
+
+    # connMu guards socket, which upstream holds in a std::atomic<int>.
+    attr_accessor :connMu, sync.Mutex
+    attr_accessor :socket, net.Conn
+
+    # rx is the receive buffer holding the bytes read from the socket that do
+    # not form a complete message yet. Only touched by the worker goroutine.
+    attr_accessor :rx, Array[byte]
+
+    attr_accessor :sharedMap, @@SharedMap
+
+    # GetThreadName gets the thread name.
+    def GetThreadName # () -> string
+      return self.threadName
+    end
+
+    def conn # () -> net.Conn
+      self.connMu.Lock()
+      defer self.connMu.Unlock()
+
+      return self.socket
+    end
+
+    # dropConn closes the connection and marks the descriptor as gone, which is
+    # upstream's `close(_socket); _socket = -1`.
+    def dropConn # ()
+      self.connMu.Lock()
+      defer self.connMu.Unlock()
+
+      if self.socket != nil
+        _ = self.socket.Close()
+        self.socket = nil
+      end
+    end
+
+    # CreateThread is called once to create the worker goroutine. It reports
+    # whether the goroutine is created and the socket could be connected.
+    def CreateThread(socketPath) # (string) -> bool
+      self.mu.Lock()
+
+      if self.running
+        self.mu.Unlock()
+        return true
+      end
+
+      self.running = true
+      self.exit = false
+      self.timerExit = false
+      self.socketPath = socketPath
+      self.done = make(Chan[Struct[]])
+      self.timerDone = make(Chan[Struct[]])
+      self.mu.Unlock()
+
+      # Upstream synchronises on a promise so that the worker has entered
+      # Process() before initSocket() posts to it. Posting takes the queue lock,
+      # so the message is picked up whenever the goroutine gets scheduled and no
+      # handshake is needed.
+      go lambda {
+        self.process()
+      }.()
+
+      return self.initSocket()
+    end
+
+    # ExitThread is called once a program exit to exit the worker goroutine.
+    def ExitThread # ()
+      self.mu.Lock()
+
+      unless self.running
+        self.mu.Unlock()
+        return
+      end
+
+      # Set under the queue mutex so PostMsg() can't enqueue behind the exit message
+      self.exit = true
+      self.queue = append(self.queue, threadMsg.new(id: MSG_EXIT_THREAD))
+      self.cv.Signal()
+      done = self.done
+      self.mu.Unlock()
+
+      done.<<
+
+      # Clear the queue if anything added while waiting for join
+      self.mu.Lock()
+      self.running = false
+      self.queue = nil
+      self.mu.Unlock()
+
+      self.dropConn()
+    end
+
+    # PostMsg adds a message to the thread queue. It returns false if the thread is
+    # shutting down and the message was dropped.
+    def PostMsg(data) # (*MsgData) -> bool
+      self.mu.Lock()
+      defer self.mu.Unlock()
+
+      if self.exit
+        return false
+      end
+
+      self.queue = append(self.queue, threadMsg.new(id: MSG_POST_USER_DATA, msg: data))
+      self.cv.Signal()
+
+      return true
+    end
+
+    # GetQueueSize gets the size of the thread message queue.
+    def GetQueueSize # () -> int
+      self.mu.Lock()
+      defer self.mu.Unlock()
+
+      return len(self.queue)
+    end
+
+    def initSocket # () -> bool
+      if self.socketPath == ""
+        # upstream asserts
+        return false
+      end
+
+      var :conn, net.Conn
+      var :err, error
+      attempt = 0
+      while attempt < 20
+        conn, err = net.Dial("unix", self.socketPath)
+        if err == nil
+          break
+        end
+        time.Sleep(50 * time.Millisecond)
+        attempt = attempt + 1
+      end
+
+      if err
+        perror("connect", err)
+        return false
+      end
+
+      self.connMu.Lock()
+      self.socket = conn
+      self.connMu.Unlock()
+
+      # send a welcome message to the SocketAPI
+      self.PostMsg(@MsgData.new(Msg: "VERSION"))
+
+      return true
+    end
+
+    def socketSendMsg(msgData) # (*MsgData) -> bool
+      msg = msgData.Msg
+
+      # prepare the OpenCloud message to be sent over the wire
+      conn = self.conn()
+
+      if msg == "" || conn == nil
+        return false
+      end
+
+      j, err = json.Marshal(sendMessage.new(
+        Arguments: sendArguments.new(msgData.File, msgData.FileID, msgData.Requester),
+        ID: strconv.Itoa(msgData.ID)
+      ))
+      if err
+        return false
+      end
+
+      msg = msg + ":"
+      msg = msg + string(j)
+      msg = msg + "\n"
+
+      fmt.Println("Raw message: " + msg)
+
+      # Upstream passes MSG_NOSIGNAL so that a peer closing the socket cannot
+      # bring down the whole fuse layer with a SIGPIPE. The Go runtime already
+      # ignores SIGPIPE on anything but stdout and stderr.
+      if (_, err = io.WriteString(conn, msg))
+        perror("send", err)
+        # Mark the descriptor as gone so we do not keep reading from and
+        # writing to a closed fd on every subsequent tick.
+        self.dropConn()
+
+        return false
+      end
+
+      fmt.Println("Sent message: " + msg)
+
+      return true
+    end
+
+    # processSocketInput drains everything readable from the socket into rx and
+    # dispatches every complete (newline terminated) message it contains.
+    def processSocketInput # ()
+      conn = self.conn()
+
+      if conn == nil
+        # the socket can only be nil if the connection was closed by the peer.
+        # But this fuse layer is completely controlled by the client, which is
+        # the peer, so every reconnect attempt will fail.
+        # Also, if the client goes down and closes the socket, this fuse is also
+        # closed down.
+        return
+      end
+
+      # The socket is a SOCK_STREAM and carries no message boundaries: a single
+      # read may return a fragment of a message, several messages at once, or
+      # both. Accumulate into rx and only dispatch complete lines.
+      buf = make(Array[byte], SINGLE_READ_BUFFER_SIZE)
+
+      peerClosed = false
+      contRead = true
+
+      while contRead
+        # A deadline just ahead of now turns the read into a poll: anything
+        # already buffered comes back, and an idle socket reports a timeout
+        # where a non-blocking descriptor reports EAGAIN. The deadline has to
+        # be in the future, because the poller reports an expired one without
+        # attempting the read at all, which would never drain the socket.
+        _ = conn.SetReadDeadline(time.Now().Add(READ_POLL_TIMEOUT))
+
+        n, err = conn.Read(buf)
+
+        if n > 0
+          # all good, we read something and continue to do so
+          self.rx = append(self.rx, *buf[...n])
+          next
+        end
+
+        if errors.Is(err, io.EOF)
+          # Peer closed the connection. Whatever is left in the buffer will
+          # be interpreted - and remaining incompleted reads will be erased.
+          fmt.Fprintln(os.Stderr, "Socket closed by peer")
+          peerClosed = true
+          contRead = false
+        elsif errors.Is(err, os.ErrDeadlineExceeded)
+          # EAGAIN: no data is available at the moment, which is not an issue
+          # for a non blocking socket.
+          contRead = false
+        elsif errors.Is(err, net.ErrClosed)
+          contRead = false
+        else
+          # a serious error was reported
+          contRead = false
+
+          if err
+            perror("socket read", err)
+          end
+        end
+      end
+
+      # handle the contents of rx here
+      pos = 0
+
+      loop do
+        newpos = bytes.IndexByte(self.rx[pos...], "\\n")
+
+        if newpos < 0
+          break
+        end
+
+        self.handleReceivedMsg(string(self.rx[pos...pos + newpos]))
+        pos = pos + newpos + 1
+      end
+
+      # clear everything that was processed
+      self.rx = self.rx[pos...]
+
+      # A peer that never sends a newline must not be able to grow our buffer
+      # without bound.
+      # Also, if the peer closed, because that are useless fragments after
+      # connection closed
+      if peerClosed || len(self.rx) > MAX_RX_BUFFER_SIZE
+        fmt.Fprintf(os.Stderr, "Discarding %d bytes from the socket API\n", len(self.rx))
+        self.rx = nil
+      end
+    end
+
+    def handleReceivedMsg(msg) # (string)
+      if msg == ""
+        return
+      end
+
+      fmt.Println("Handle single message " + msg)
+
+      msgType, msgAttr, found = strings.Cut(msg, ":")
+
+      unless found
+        fmt.Fprintln(os.Stderr, "Invalid message format: " + msg)
+        return
+      end
+
+      case msgType
+      when "V2/HYDRATE_FILE_RESULT"
+        status = ""
+
+        # Every get<> upstream throws on a missing or mistyped field and is
+        # caught as an invalid message, so each one is checked here.
+        var :j, hydrateResult
+
+        invalid = lambda { |reason| # (string)
+          fmt.Fprintln(os.Stderr, "Invalid JSON message: " + msgAttr + reason)
+        }
+
+        if (err = json.Unmarshal(Array[byte].(msgAttr), @j))
+          invalid(err.Error())
+          return
+        end
+
+        id, err = strconv.Atoi(j.ID)
+        if err
+          invalid(err.Error())
+          return
+        end
+
+        var :arguments, Hash[string, any]
+
+        if (err = json.Unmarshal(j.Arguments, @arguments))
+          invalid(err.Error())
+          return
+        end
+
+        if (errValue, contains = arguments["error"])
+          fmt.Fprintf(os.Stderr, "Error from socket API for Id %d: %v\n", id, errValue)
+        else
+          statusValue, isString = arguments["status"].(string)
+
+          unless isString
+            invalid("missing status")
+            return
+          end
+
+          status = statusValue
+        end
+
+        if id > 0
+          # Default set to fail
+          res = HydFailed
+
+          if status == "OK"
+            # good!
+            res = HydSuccess
+          else
+            fmt.Printf("ERROR from socket API for Id%d\n", id)
+          end
+
+          hj = HydJob.new(State: res)
+
+          unless self.sharedMap.Set(id, hj)
+            # the id could not be set. That means, the job was not inserted.
+            fmt.Printf("Job not found:%d\n", id)
+          else
+            fmt.Printf("Setting Job ID %d to result %s\n", id, hj.State)
+          end
+        end
+      when "VERSION"
+        attribs = strSplit(msgAttr, ':')
+
+        if len(attribs) == 3
+          fmt.Println("Got PID of the Desktop Client: " + attribs[2])
+
+          pid, err = strconv.ParseInt(attribs[2], 10, 64)
+
+          if err == nil
+            self.sharedMap.SetDesktopClientPID(pid)
+          end
+        end
+      end
+    end
+
+    # timerThread is the entry point for the timer goroutine.
+    def timerThread # ()
+      defer close(self.timerDone)
+
+      loop do
+        self.mu.Lock()
+        stop = self.timerExit
+        self.mu.Unlock()
+
+        if stop
+          return
+        end
+
+        # Sleep for 250mS then put a MSG_TIMER into the message queue
+        time.Sleep(250 * time.Millisecond)
+
+        # Add timer msg to queue and notify worker goroutine
+        self.mu.Lock()
+        self.queue = append(self.queue, threadMsg.new(id: MSG_TIMER))
+        self.cv.Signal()
+        self.mu.Unlock()
+      end
+    end
+
+    # process is the entry point for the worker goroutine.
+    def process # ()
+      defer close(self.done)
+
+      self.mu.Lock()
+      self.timerExit = false
+      self.mu.Unlock()
+
+      go lambda {
+        self.timerThread()
+      }.()
+
+      loop do
+        var :msg, threadMsg
+
+        begin
+          # Wait for a message to be added to the queue
+          self.mu.Lock()
+
+          while len(self.queue) == 0
+            self.cv.Wait()
+          end
+
+          msg = self.queue[0]
+          self.queue = self.queue[1...]
+          self.mu.Unlock()
+        end
+
+        # The msg.id is an Id to identify the kind of thread msg. It is
+        # not the transfer id of the client job
+        case msg.id
+        when MSG_POST_USER_DATA
+          if msg.msg == nil
+            # upstream asserts
+            break
+          end
+
+          fmt.Println("Received user data message")
+
+          msgData = msg.msg
+          fmt.Printf("Sending %d: %s %s on %s\n", msgData.ID, msgData.Msg, msgData.File, self.threadName)
+
+          unless self.socketSendMsg(msgData)
+            fmt.Printf("Failed to send msg %d: %s\n", msgData.ID, msgData.Msg)
+
+            # The job was registered by the caller before it posted the
+            # message, so a failure to send has to be published as such.
+            # Otherwise the caller waits out its full timeout for a
+            # request that never left the machine.
+            if msgData.ID > 0
+              self.sharedMap.Set(msgData.ID, HydJob.new(State: HydFailed))
+            end
+          end
+        when MSG_TIMER
+          self.processSocketInput()
+        when MSG_EXIT_THREAD
+          self.mu.Lock()
+          self.timerExit = true
+          self.mu.Unlock()
+          self.timerDone.<<
+
+          return
+        end
+      end
+    end
+  end
+
+  def NewSocketThread(threadName, m) # (string, *SharedMap) -> *SocketThread
+    s = @SocketThread.new(threadName: threadName, sharedMap: m)
+    s.cv = sync.NewCond(@s.mu)
+
+    return s
+  end
+
+  # perror is perror(3).
+  def perror(what, err) # (string, error)
+    fmt.Fprintf(os.Stderr, "%s: %v\n", what, err)
+  end
+end

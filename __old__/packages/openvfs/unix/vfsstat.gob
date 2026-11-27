@@ -1,0 +1,111 @@
+#go:build linux || darwin
+
+require "fmt"
+require "os"
+require "path/filepath"
+
+module Unix
+  # Transpiled from src/vfsstat/main.cpp.
+
+  def getPlaceholderAttribs(path) # (string) -> PlaceHolderAttributes
+    data, ok = xattrGetString(path, XAttrData)
+
+    unless ok
+      return PlaceHolderFromData(path, nil)
+    end
+
+    return PlaceHolderFromData(path, Array[byte].(data))
+  end
+
+  def statEntry(path) # (string)
+    data = getPlaceholderAttribs(path)
+    valid = "❌"
+
+    if data.Validate()
+      valid = "✅"
+    end
+
+    fmt.Println(formatRow(filepath.Base(path), valid,
+      fmt.Sprint(data.Size), fmt.Sprint(data.RealSize()),
+      data.State.String(), data.PinState.String(), data.Etag, data.FileID))
+  end
+
+  # formatRow is the std::format call shared by the header and the rows:
+  # "{:<60} {:^4} {:>10} {:>10} {:>10} {:>10} {:<33} {}" for a row, with the
+  # header's left aligned variant produced by headerRow below.
+  def formatRow(path, valid, size, actual, state, pinState, etag, fileID) # (string, string, string, string, string, string, string, string) -> string
+    return fmt.Sprintf("%-60s %s %10s %10s %10s %10s %-33s %s",
+      path, center(valid, 4), size, actual, state, pinState, etag, fileID)
+  end
+
+  # center is std::format's '^' alignment.
+  def center(s, width) # (string, int) -> string
+    n = len(Array[rune].(s))
+
+    if n >= width
+      return s
+    end
+
+    left = (width - n) / 2
+    right = width - n - left
+
+    return spaces(left) + s + spaces(right)
+  end
+
+  def spaces(n) # (int) -> string
+    out = make(Array[byte], n)
+
+    out.each do |i|
+      out[i] = ' '
+    end
+
+    return string(out)
+  end
+
+  # RunStat is main() of src/vfsstat/main.cpp. It returns the process exit code,
+  # which upstream leaves at -1 for everything but a directory listing.
+  def RunStat(argv) # ([]string) -> int
+    unless platformInstalled()
+      fmt.Fprintln(os.Stderr, errNoPlatform)
+      return -1
+    end
+
+    if len(argv) == 2
+      path = argv[1]
+
+      info, err = os.Lstat(path)
+      if err
+        fmt.Printf("%q does not exist\n", path)
+        return -1
+      end
+
+      registration = RegistrationFromAttributes(path)
+
+      if registration.IsOK()
+        fmt.Printf("OpenVfs Stat: '%s' Owner: '%s' OpenVFS Version: %d\n", path, registration.Owner, registration.Version)
+      else
+        fmt.Printf("OpenVfs Stat: '%s' (%s)\n", path, registration.Error)
+      end
+
+      fmt.Printf("%-60s %-4s %-10s %-10s %-10s %-10s %-33s %s\n",
+        "Path", "Valid", "Size", "ActualSize", "State", "PinState", "Etag", "FileId")
+
+      if info.IsDir()
+        entries, err = os.ReadDir(path)
+        if err
+          return -1
+        end
+
+        entries.each do |_, child|
+          statEntry(filepath.Join(path, child.Name()))
+        end
+
+        return 0
+      end
+
+      statEntry(path)
+    end
+
+    return -1
+  end
+end

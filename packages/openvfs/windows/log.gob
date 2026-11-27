@@ -1,7 +1,6 @@
 #go:build windows
 
-require "fmt"
-require "log"
+require "github.com/rs/zerolog/log"
 
 module Windows
   # The Q_LOGGING_CATEGORY declarations of the three cfapi translation units.
@@ -9,24 +8,20 @@ module Windows
   # the categories declared with a level other than the default.
 
   var loggingCategory = Struct.new(name: string) do
-    def emit(level, format, v) # (string, string, ...any)
-      log.Printf("[%s] %s %s", level, self.name, fmt.Sprintf(format, *v))
-    end
-
     def Debug(format, v) # (string, ...any)
-      self.emit("debug", format, *v)
+      log.Debug().Str("category", self.name).Msgf(format, *v)
     end
 
     def Info(format, v) # (string, ...any)
-      self.emit("info", format, *v)
+      log.Info().Str("category", self.name).Msgf(format, *v)
     end
 
     def Warning(format, v) # (string, ...any)
-      self.emit("warning", format, *v)
+      log.Warn().Str("category", self.name).Msgf(format, *v)
     end
 
     def Critical(format, v) # (string, ...any)
-      self.emit("critical", format, *v)
+      log.Error().Str("category", self.name).Msgf(format, *v)
     end
   end
 
@@ -39,6 +34,6 @@ module Windows
 
   # logWarning is for the few places that warn outside a category.
   def logWarning(format, v) # (string, ...any)
-    log.Printf("[warning] %s", fmt.Sprintf(format, *v))
+    log.Warn().Msgf(format, *v)
   end
 end

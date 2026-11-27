@@ -1,0 +1,106 @@
+module Unix
+  # Transpiled from src/openvfs/openvfconstants.h.
+  #
+  # Defines the available attributes and their field names in the messagepack
+  # blob.
+
+  # Version mirrors OPENVFS_VERSION_MAJOR, which ecm_setup_version() derives
+  # from the CMake project version (0.1.0).
+  const :Version, 0
+
+  # XAttributeNames
+
+  # XAttrData is the XAttribute name for OpenVfs objects.
+  const :XAttrData, "user.data"
+  # XAttrRealSize is the Xattribute provided by OpenVFSFuse to determine
+  # the size on the filesystem.
+  const :XAttrRealSize, "user.realsize"
+  const :XAttrRegistration, "user.registration"
+
+  var RegistrationAttributes = Class.new(uint8) do
+    protected def String # () -> string
+      case self
+      when RegistrationOwner
+        return "owner"
+      when RegistrationVersion
+        return "version"
+      end
+
+      return ""
+    end
+  end
+
+  const :RegistrationOwner, 0
+  const :RegistrationVersion, 1
+
+  var Attributes = Class.new(uint8) do
+    protected def String # () -> string
+      case self
+      when AttrEtag
+        return "etag"
+      when AttrFileID
+        return "fileid"
+      when AttrSize
+        return "size"
+      when AttrState
+        return "state"
+      when AttrPinState
+        return "pinstate"
+      end
+
+      return ""
+    end
+  end
+
+  const :AttrEtag, 0
+  const :AttrFileID, 1
+  const :AttrSize, 2
+  const :AttrState, 3
+  const :AttrPinState, 4
+
+  var State = Class.new(uint8) do
+    protected def String # () -> string
+      case self
+      when StateHydrated
+        return "hydrated"
+      when StateDehydrated
+        return "dehydrated"
+      when StateHydrating
+        return "hydrating"
+      end
+
+      return ""
+    end
+  end
+
+  const :StateHydrated, 0
+  const :StateDehydrated, 1
+  const :StateHydrating, 2
+
+  var PinState = Class.new(uint8) do
+    # String mirrors Constants::name(PinStates) verbatim, including upstream's
+    # OnlineOnly/AlwaysLocal returning "hydrated"/"dehydrated".
+    protected def String # () -> string
+      case self
+      when PinOnlineOnly
+        return "hydrated"
+      when PinAlwaysLocal
+        return "dehydrated"
+      when PinInherited
+        return "inherited"
+      when PinExcluded
+        return "excluded"
+      when PinUnspecified
+        return "unspecified"
+      end
+
+      return ""
+    end
+  end
+
+  const :PinUnspecified, 0
+  const :PinOnlineOnly, 1
+  const :PinAlwaysLocal, 2
+  const :PinInherited, 3
+  const :PinExcluded, 4
+end

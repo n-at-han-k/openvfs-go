@@ -217,7 +217,18 @@ module Unix
         return false
       end
 
-      conn, err = net.Dial("unix", self.socketPath)
+      var :conn, net.Conn
+      var :err, error
+      attempt = 0
+      while attempt < 20
+        conn, err = net.Dial("unix", self.socketPath)
+        if err == nil
+          break
+        end
+        time.Sleep(50 * time.Millisecond)
+        attempt = attempt + 1
+      end
+
       if err
         perror("connect", err)
         return false
