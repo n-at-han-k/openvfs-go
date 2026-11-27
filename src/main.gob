@@ -1,4 +1,5 @@
 require "context"
+require "io/fs"
 require "os"
 require "os/signal"
 require "path/filepath"
@@ -38,7 +39,33 @@ module Main
       return base == dbName || base == dbName + "-wal" || base == dbName + "-shm"
     }
 
+    if (err = scan(j, root, ignored))
+      log.Warn().Err(err).Msg("initial scan")
+    end
+
     go directory.RunWatcher(ctx, root, ignored, lambda { |event| # (directory.Event)
+      if event.Kind == directory.Rescan || event.Kind == directory.Poll
+        log.Info().Str("kind", event.Kind.String()).Msg("change")
+        if (err = scan(j, root, ignored))
+          log.Warn().Err(err).Str("kind", event.Kind.String()).Msg("scan")
+        end
+
+        return
+      end
+
+      record(j, root, event)
+    })
+
+    go directory.RunPoller(ctx, 30 * time.Second, lambda { |event| # (directory.Event)
+      if event.Kind == directory.Rescan || event.Kind == directory.Poll
+        log.Info().Str("kind", event.Kind.String()).Msg("change")
+        if (err = scan(j, root, ignored))
+          log.Warn().Err(err).Str("kind", event.Kind.String()).Msg("scan")
+        end
+
+        return
+      end
+
       record(j, root, event)
     })
 
@@ -68,6 +95,78 @@ module Main
     end
 
     return 0
+  end
+
+  # scan walks root and reconciles the journal with what is on disk.
+  def scan(j, root, ignored) # (*journal.Journal, string, func(string) bool) -> error
+    seen = make(Hash[string, bool])
+
+    err = filepath.WalkDir(root, lambda { |path, d, err| # (string, fs.DirEntry, error) -> error
+      if err
+        return err
+      end
+
+      rel, err = filepath.Rel(root, path)
+      if err
+        return err
+      end
+
+      rel = filepath.ToSlash(rel)
+
+      if rel == "."
+        return nil
+      end
+
+      if ignored(rel)
+        if d.IsDir()
+          return filepath.SkipDir
+        end
+
+        return nil
+      end
+
+      if d.IsDir()
+        return nil
+      end
+
+      info, err = d.Info()
+      if err
+        return err
+      end
+
+      seen[rel] = true
+
+      if (err = j.Record(rel, inodeOf(info), info.ModTime().Unix(), info.Size()))
+        log.Warn().Err(err).Str("path", rel).Msg("record")
+      end
+
+      return nil
+    })
+
+    if err
+      return err
+    end
+
+    paths, err = j.Paths()
+    if err
+      return err
+    end
+
+    paths.each do |_, p|
+      if (_, ok = seen[p])
+        next
+      end
+
+      if ignored(p)
+        next
+      end
+
+      if (err = j.Forget(p))
+        log.Warn().Err(err).Str("path", p).Msg("forget")
+      end
+    end
+
+    return nil
   end
 
   # record folds one watcher event into the journal.

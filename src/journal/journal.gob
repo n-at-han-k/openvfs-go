@@ -59,6 +59,30 @@ module Journal
       return err
     end
 
+    # Paths returns every path currently recorded in the journal.
+    def Paths # () -> ([]string, error)
+      rows, err = self.Files.Query("SELECT path FROM files")
+      if err
+        return nil, err
+      end
+
+      defer rows.Close()
+
+      var :paths, Array[string]
+
+      while rows.Next()
+        var :path, string
+
+        if (err = rows.Scan(@path))
+          return nil, err
+        end
+
+        paths = append(paths, path)
+      end
+
+      return paths, rows.Err()
+    end
+
     def Close # () -> error
       return self.db.Close()
     end

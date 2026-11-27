@@ -23,6 +23,8 @@ module Directory
         return "Chmod"
       when Rescan
         return "Rescan"
+      when Poll
+        return "Poll"
       end
 
       return "Unknown"
@@ -36,6 +38,8 @@ module Directory
   const :Chmod, 16
   # Rescan means events were dropped, so the root has to be walked again.
   const :Rescan, 32
+  # Poll is a scheduled rescan request.
+  const :Poll, 64
 
   def fromFsnotify(op) # (fsnotify.Op) -> EventKind
     if op.Has(fsnotify.Create)
