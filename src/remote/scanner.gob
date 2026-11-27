@@ -11,8 +11,8 @@ module Remote
   class Scanner
     attr_accessor :client, @@Client
 
-    # Scan walks dir recursively and calls onEntry for each file found.
-    def Scan(ctx, dir, onEntry) # (context.Context, string, func(webdav.FileInfo)) -> error
+    # Scan walks dir recursively and calls onEntry for each entry found.
+    def Scan(ctx, dir, onEntry) # (context.Context, string, func(string, webdav.FileInfo)) -> error
       entries, err = self.client.List(ctx, dir)
       if err
         return err
@@ -44,7 +44,7 @@ module Remote
         if entry.IsDir
           log.Info().Str("path", entryPath).Msg("remote dir")
           if onEntry != nil
-            onEntry(entry)
+            onEntry(entryPath, entry)
           end
           if (err = self.Scan(ctx, entryPath, onEntry))
             log.Warn().Err(err).Str("path", entryPath).Msg("remote scan")
@@ -52,7 +52,7 @@ module Remote
         else
           log.Info().Str("path", entryPath).Int64("size", entry.Size).Str("etag", entry.ETag).Msg("remote file")
           if onEntry != nil
-            onEntry(entry)
+            onEntry(entryPath, entry)
           end
         end
       end

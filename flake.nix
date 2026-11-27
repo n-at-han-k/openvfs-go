@@ -35,7 +35,7 @@
         gobPack = {
           x86_64-linux = {
             platform = "x86_64-linux";
-            sha256 = "0swv0pa2h7d4i4v306wz51qm8y36q70bfzx8xzd8gva972jn8cyl";
+            sha256 = "1jpnh086zdi05v6x60jw0s00qxmpvym26vcgg5x3gjkmn4fby7g8";
           };
           aarch64-linux = {
             platform = "aarch64-linux";

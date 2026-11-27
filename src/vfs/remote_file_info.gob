@@ -1,4 +1,5 @@
 require "os"
+require "path/filepath"
 require "strconv"
 
 require "github.com/vmihailenco/msgpack/v5"
@@ -77,5 +78,62 @@ module Vfs
     ))
 
     return b
+  end
+
+  # PlaceholderData marshals OpenVFS xattr data for a remote file.
+  def PlaceholderData(etag, fileID, size, state, pinState) # (string, string, int64, int, int) -> []byte
+    b, _ = msgpack.Marshal(Hash[string, any].new(
+      "etag" => etag,
+      "fileid" => fileID,
+      "size" => uint64(size),
+      "state" => uint64(state),
+      "pinstate" => uint64(pinState)
+    ))
+
+    return b
+  end
+
+  # WriteDehydratedPlaceholder creates or updates a 0-byte placeholder file with
+  # OpenVFS metadata. It does not overwrite hydrated file content.
+  def WriteDehydratedPlaceholder(path, etag, fileID, size) # (string, string, string, int64) -> error
+    if (err = os.MkdirAll(filepath.Dir(path), 0755))
+      return err
+    end
+
+    st, err = os.Stat(path)
+    if err == nil
+      if st.IsDir()
+        return nil
+      end
+
+      attr, ok = RemoteFileInfoFromAttributes(path)
+      if ok && attr.IsOK()
+        if attr.State == StateHydrated && st.Size() > 0
+          return nil
+        end
+
+        if attr.State == StateDeHydrated && st.Size() == 0 && attr.Etag == etag && attr.FileID == fileID && attr.Size == uint64(size)
+          return nil
+        end
+      end
+
+      if (err = os.Truncate(path, 0))
+        return err
+      end
+    else
+      if !os.IsNotExist(err)
+        return err
+      end
+
+      f, err = os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+      if err
+        return err
+      end
+
+      f.Close()
+    end
+
+    data = PlaceholderData(etag, fileID, size, StateDeHydrated, PinInherited)
+    return LocalPath(path).SetXAttr(XAttrData, data, 0)
   end
 end

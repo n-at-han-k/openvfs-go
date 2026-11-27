@@ -1,8 +1,13 @@
 require "context"
+require "errors"
 require "os"
+require "os/exec"
 require "path/filepath"
 require "strings"
+require "syscall"
 require "time"
+
+require "golang.org/x/sys/unix"
 
 require "example.com/project/src/directory"
 require "example.com/project/src/journal"
@@ -32,7 +37,15 @@ module Main
       path = filepath.Join(self.Mountpoint)
       err = os.MkdirAll(path, 0755)
       if err
-        log.Info().Str("setup", path).Msg("mount directory created")
+        _, serr = os.Stat(path)
+        if serr != nil && errors.Is(serr, syscall.ENOTCONN)
+          _ = unix.Unmount(path, unix.MNT_DETACH)
+          _ = exec.Command("fusermount3", "-uz", path).Run()
+          err = os.MkdirAll(path, 0755)
+        end
+      end
+
+      if err
         return err
       end
 

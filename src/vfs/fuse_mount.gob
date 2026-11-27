@@ -1,8 +1,11 @@
 require "context"
 require "fmt"
 require "os"
+require "os/exec"
 require "syscall"
 require "time"
+
+require "golang.org/x/sys/unix"
 
 require "github.com/hanwen/go-fuse/v2/fs"
 require "github.com/hanwen/go-fuse/v2/fuse", gofuse
@@ -122,7 +125,15 @@ module Vfs
 
     var :st, syscall.Stat_t
     if (err = syscall.Stat(mountpoint, @st))
-      return nil, err
+      if err == syscall.ENOTCONN
+        _ = unix.Unmount(mountpoint, unix.MNT_DETACH)
+        _ = exec.Command("fusermount3", "-uz", mountpoint).Run()
+        err = syscall.Stat(mountpoint, @st)
+      end
+
+      if err
+        return nil, err
+      end
     end
 
     m = @FuseMount.new(

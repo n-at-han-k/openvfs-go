@@ -1,8 +1,12 @@
 require "context"
+require "os"
+require "path/filepath"
 
 require "example.com/project/src/directory"
 require "example.com/project/src/journal"
 require "example.com/project/src/remote"
+require "example.com/project/src/vfs"
+require "github.com/migadu/go-webdav"
 require "github.com/rs/zerolog/log"
 
 module Main
@@ -70,7 +74,11 @@ module Main
         return nil
       end
 
-      return self.remote.Scan(ctx, "", nil)
+      return self.remote.Scan(ctx, "", lambda { |path, entry| # (string, webdav.FileInfo)
+        if (err = self.journal.RecordRemote(path, entry.IsDir, entry.ETag, "", entry.Size))
+          log.Warn().Err(err).Str("path", path).Msg("remote record")
+        end
+      })
     end
 
     def reconcile(ctx) # (context.Context) -> error
@@ -78,6 +86,36 @@ module Main
     end
 
     def propagate(ctx) # (context.Context) -> error
+      entries, err = self.journal.Entries()
+      if err
+        return err
+      end
+
+      entries.each do |_, entry|
+        if entry.Path == "" || entry.Path == "."
+          next
+        end
+
+        remoteBacked = entry.IsDir || entry.RemoteEtag != "" || entry.RemoteFileID != "" || entry.RemoteSize != 0
+        unless remoteBacked
+          next
+        end
+
+        full = filepath.Join(self.scanner.Root(), entry.Path)
+
+        if entry.IsDir
+          if (err = os.MkdirAll(full, 0755))
+            log.Warn().Err(err).Str("path", entry.Path).Msg("placeholder dir")
+          end
+
+          next
+        end
+
+        if (err = vfs.WriteDehydratedPlaceholder(full, entry.RemoteEtag, entry.RemoteFileID, entry.RemoteSize))
+          log.Warn().Err(err).Str("path", entry.Path).Msg("placeholder file")
+        end
+      end
+
       return nil
     end
   end

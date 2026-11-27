@@ -4,40 +4,87 @@
 require "database/sql"
 require "os"
 require "path/filepath"
+require "strings"
 
 require "modernc.org/sqlite", _
 
 module Journal
-  CREATE_FILES_TABLE = "CREATE TABLE IF NOT EXISTS files (" +
-    "path TEXT PRIMARY KEY, " +
-    "inode INTEGER, " +
-    "modtime INTEGER, " +
-    "size INTEGER, " +
-    "etag TEXT, " +
-    "fileid TEXT)"
-
-  RECORD_FILE_QUERY = "INSERT INTO files (path, inode, modtime, size) VALUES (?, ?, ?, ?) " +
+  RECORD_LOCAL_QUERY = "INSERT INTO files (path, is_dir, inode, local_mtime, local_size) VALUES (?, 0, ?, ?, ?) " +
     "ON CONFLICT(path) DO UPDATE SET inode = excluded.inode, " +
-    "modtime = excluded.modtime, size = excluded.size"
+    "local_mtime = excluded.local_mtime, local_size = excluded.local_size"
 
-  # The inode index is what makes a rename cheap to spot: the same inode under
-  # a new path is a move, not a delete followed by a create.
-  CREATE_INODE_INDEX = "CREATE INDEX IF NOT EXISTS files_inode ON files (inode)"
+  RECORD_REMOTE_QUERY = "INSERT INTO files (path, is_dir, remote_etag, remote_fileid, remote_size) VALUES (?, ?, ?, ?, ?) " +
+    "ON CONFLICT(path) DO UPDATE SET is_dir = excluded.is_dir, remote_etag = excluded.remote_etag, " +
+    "remote_fileid = excluded.remote_fileid, remote_size = excluded.remote_size"
 
-  PATH_BY_INODE_QUERY = "SELECT path FROM files WHERE inode = ? LIMIT 1"
+  SET_STATE_QUERY = "UPDATE files SET state = ?, pin_state = ? WHERE path = ?"
+
+  GET_FILE_QUERY = "SELECT path, COALESCE(is_dir,0), COALESCE(inode,0), COALESCE(local_mtime,0), COALESCE(local_size,0), COALESCE(remote_etag,''), COALESCE(remote_fileid,''), COALESCE(remote_size,0), COALESCE(state,0), COALESCE(pin_state,0) FROM files WHERE path = ?"
+
+  ALL_FILES_QUERY = "SELECT path, COALESCE(is_dir,0), COALESCE(inode,0), COALESCE(local_mtime,0), COALESCE(local_size,0), COALESCE(remote_etag,''), COALESCE(remote_fileid,''), COALESCE(remote_size,0), COALESCE(state,0), COALESCE(pin_state,0) FROM files ORDER BY path"
+
+  PATH_BY_INODE_QUERY = "SELECT path FROM files WHERE inode = ? AND inode != 0 LIMIT 1"
 
   FORGET_FILE_QUERY = "DELETE FROM files WHERE path = ?"
+
+  var Entry = Struct.new(
+    Path: string,
+    IsDir: bool,
+    Inode: uint64,
+    LocalMTime: int64,
+    LocalSize: int64,
+    RemoteEtag: string,
+    RemoteFileID: string,
+    RemoteSize: int64,
+    State: int,
+    PinState: int
+  )
 
   class Journal
     attr_accessor :db, @@sql.DB
     attr_accessor :Files, @@Table
 
-    # Record stores what is now known about path, which is relative to the
-    # sync root.
+    # Record stores local file knowledge, preserving remote fields.
     def Record(path, inode, modtime, size) # (string, uint64, int64, int64) -> error
-      _, err = self.Files.Exec(RECORD_FILE_QUERY, path, inode, modtime, size)
+      _, err = self.Files.Exec(RECORD_LOCAL_QUERY, path, inode, modtime, size)
 
       return err
+    end
+
+    # RecordRemote stores remote knowledge, preserving local fields.
+    def RecordRemote(path, isDir, etag, fileID, size) # (string, bool, string, string, int64) -> error
+      dir = 0
+      if isDir
+        dir = 1
+      end
+
+      _, err = self.Files.Exec(RECORD_REMOTE_QUERY, path, dir, etag, fileID, size)
+
+      return err
+    end
+
+    # SetState updates hydration/pin state for a known path.
+    def SetState(path, state, pinState) # (string, int, int) -> error
+      _, err = self.Files.Exec(SET_STATE_QUERY, state, pinState, path)
+
+      return err
+    end
+
+    # Get returns the entry for path.
+    def Get(path) # (string) -> (Entry, bool)
+      var :e, Entry
+      var :isDir, int
+
+      err = self.Files.QueryRow(GET_FILE_QUERY, path).Scan(
+        @e.Path, @isDir, @e.Inode, @e.LocalMTime, @e.LocalSize,
+        @e.RemoteEtag, @e.RemoteFileID, @e.RemoteSize, @e.State, @e.PinState
+      )
+      if err
+        return Entry.new(), false
+      end
+
+      e.IsDir = isDir != 0
+      return e, true
     end
 
     # PathByInode returns the path last recorded for inode, which is how a
@@ -83,9 +130,106 @@ module Journal
       return paths, rows.Err()
     end
 
+    # Entries returns every file currently recorded in the journal.
+    def Entries # () -> ([]Entry, error)
+      rows, err = self.Files.Query(ALL_FILES_QUERY)
+      if err
+        return nil, err
+      end
+
+      defer rows.Close()
+
+      var :entries, Array[Entry]
+
+      while rows.Next()
+        var :e, Entry
+        var :isDir, int
+
+        if (err = rows.Scan(@e.Path, @isDir, @e.Inode, @e.LocalMTime, @e.LocalSize, @e.RemoteEtag, @e.RemoteFileID, @e.RemoteSize, @e.State, @e.PinState))
+          return nil, err
+        end
+
+        e.IsDir = isDir != 0
+        entries = append(entries, e)
+      end
+
+      return entries, rows.Err()
+    end
+
     def Close # () -> error
       return self.db.Close()
     end
+  end
+
+  def tableExists(db, name) # (*sql.DB, string) -> bool
+    var :n, string
+    err = db.QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name=?", name).Scan(@n)
+    return err == nil
+  end
+
+  def migration001(db) # (*sql.DB) -> error
+    if tableExists(db, "files")
+      return nil
+    end
+
+    _, err = db.Exec("CREATE TABLE files (" +
+      "path TEXT PRIMARY KEY, " +
+      "is_dir INTEGER NOT NULL DEFAULT 0, " +
+      "inode INTEGER NOT NULL DEFAULT 0, " +
+      "local_mtime INTEGER NOT NULL DEFAULT 0, " +
+      "local_size INTEGER NOT NULL DEFAULT 0, " +
+      "remote_etag TEXT NOT NULL DEFAULT '', " +
+      "remote_fileid TEXT NOT NULL DEFAULT '', " +
+      "remote_size INTEGER NOT NULL DEFAULT 0, " +
+      "state INTEGER NOT NULL DEFAULT 0, " +
+      "pin_state INTEGER NOT NULL DEFAULT 0)")
+    if err
+      return err
+    end
+
+    _, err = db.Exec("CREATE INDEX IF NOT EXISTS files_inode ON files (inode)")
+    return err
+  end
+
+  def migration002(db) # (*sql.DB) -> error
+    columns = Array[Array[string]].new(
+      Array[string].new("is_dir", "INTEGER NOT NULL DEFAULT 0"),
+      Array[string].new("inode", "INTEGER NOT NULL DEFAULT 0"),
+      Array[string].new("local_mtime", "INTEGER NOT NULL DEFAULT 0"),
+      Array[string].new("local_size", "INTEGER NOT NULL DEFAULT 0"),
+      Array[string].new("remote_etag", "TEXT NOT NULL DEFAULT ''"),
+      Array[string].new("remote_fileid", "TEXT NOT NULL DEFAULT ''"),
+      Array[string].new("remote_size", "INTEGER NOT NULL DEFAULT 0"),
+      Array[string].new("state", "INTEGER NOT NULL DEFAULT 0"),
+      Array[string].new("pin_state", "INTEGER NOT NULL DEFAULT 0")
+    )
+
+    columns.each do |_, col|
+      _, err = db.Exec("ALTER TABLE files ADD COLUMN " + col[0] + " " + col[1])
+      if err != nil && strings.Contains(err.Error(), "duplicate column name")
+        next
+      end
+
+      if err
+        return err
+      end
+    end
+
+    _, _ = db.Exec("UPDATE files SET is_dir=COALESCE(is_dir,0), inode=COALESCE(inode,0), local_mtime=COALESCE(local_mtime,0), local_size=COALESCE(local_size,0), remote_etag=COALESCE(remote_etag,''), remote_fileid=COALESCE(remote_fileid,''), remote_size=COALESCE(remote_size,0), state=COALESCE(state,0), pin_state=COALESCE(pin_state,0)")
+
+    return nil
+  end
+
+  def runMigrations(db) # (*sql.DB) -> error
+    if (err = migration001(db))
+      return err
+    end
+
+    if (err = migration002(db))
+      return err
+    end
+
+    return nil
   end
 
   # Open opens the journal at path, creating the file and its tables if they are
@@ -104,17 +248,12 @@ module Journal
 
     db.SetMaxOpenConns(1)
 
-    files = @Table.new(db: db, name: "files", createSQL: CREATE_FILES_TABLE)
-
-    if (err = files.Create())
+    if (err = runMigrations(db))
       _ = db.Close()
       return nil, err
     end
 
-    if (_, err = files.Exec(CREATE_INODE_INDEX))
-      _ = db.Close()
-      return nil, err
-    end
+    files = @Table.new(db: db, name: "files", createSQL: "")
 
     return @Journal.new(db: db, Files: files), nil
   end

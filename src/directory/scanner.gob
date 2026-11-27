@@ -12,6 +12,10 @@ module Directory
     attr_accessor :ignored, Proc[string, [bool]]
     attr_accessor :journal, @@journal.Journal
 
+    def Root # () -> string
+      return self.root
+    end
+
     def Apply(event) # (Event)
       log.Info().Str("kind", event.Kind.String()).Str("path", event.Path).Msg("change")
 
