@@ -235,17 +235,8 @@ module Main
         handled[oldE.Path] = true
         handled[newE.Path] = true
 
-        if oldE.IsDir || newE.IsDir
-          actions = append(actions, SyncAction.new(Op: OpMoveLocal, Path: newE.Path, From: oldE.Path, Entry: newE))
-        else
-          localDirty = oldE.Dirty
-          if localDirty
-            actions = append(actions, SyncAction.new(Op: OpConflict, Path: oldE.Path, Entry: oldE))
-            actions = append(actions, SyncAction.new(Op: OpDownloadPlaceholder, Path: newE.Path, Entry: newE))
-          else
-            actions = append(actions, SyncAction.new(Op: OpMoveLocal, Path: newE.Path, From: oldE.Path, Entry: newE))
-          end
-        end
+        # Remote move: server wins.
+        actions = append(actions, SyncAction.new(Op: OpMoveLocal, Path: newE.Path, From: oldE.Path, Entry: newE))
       end
 
       entries.each do |_, e|
@@ -262,11 +253,9 @@ module Main
         hadRemote = e.LastSyncedEtag != "" || e.LastSyncedFileID != "" || e.RemoteEtag != "" || e.RemoteFileID != ""
         localDirty = e.Dirty
 
-        # Remote deleted (was known remotely, not seen in this scan)
+        # Remote deleted (was known remotely, not seen in this scan): server wins.
         if hadRemote && !remoteSeen
-          if localExists && localDirty
-            actions = append(actions, SyncAction.new(Op: OpConflict, Path: e.Path, Entry: e))
-          elsif localExists
+          if localExists
             actions = append(actions, SyncAction.new(Op: OpDeleteLocal, Path: e.Path, Entry: e))
           else
             _ = self.journal.Forget(e.Path)
@@ -304,16 +293,25 @@ module Main
             next
           end
 
-          if remoteChanged
-            if localDirty
-              actions = append(actions, SyncAction.new(Op: OpConflict, Path: e.Path, Entry: e))
+          # Type change: server wins.
+          localIsDir = self.localIsDir(e.Path)
+          if localIsDir != e.IsDir
+            actions = append(actions, SyncAction.new(Op: OpDeleteLocal, Path: e.Path, Entry: e))
+            if e.IsDir
+              actions = append(actions, SyncAction.new(Op: OpMkdirLocal, Path: e.Path, Entry: e))
             else
-              attr, ok = vfs.RemoteFileInfoFromAttributes(filepath.Join(self.mountpoint, e.Path))
-              if ok && attr.IsOK() && attr.State == vfs.StateHydrated
-                actions = append(actions, SyncAction.new(Op: OpDownloadContent, Path: e.Path, Entry: e))
-              else
-                actions = append(actions, SyncAction.new(Op: OpDownloadPlaceholder, Path: e.Path, Entry: e))
-              end
+              actions = append(actions, SyncAction.new(Op: OpDownloadPlaceholder, Path: e.Path, Entry: e))
+            end
+            next
+          end
+
+          if remoteChanged
+            # Remote changed: server wins.
+            attr, ok = vfs.RemoteFileInfoFromAttributes(filepath.Join(self.mountpoint, e.Path))
+            if ok && attr.IsOK() && attr.State == vfs.StateHydrated
+              actions = append(actions, SyncAction.new(Op: OpDownloadContent, Path: e.Path, Entry: e))
+            else
+              actions = append(actions, SyncAction.new(Op: OpDownloadPlaceholder, Path: e.Path, Entry: e))
             end
             next
           end
@@ -640,6 +638,15 @@ module Main
     def localExists(rel) # (string) -> bool
       _, err = os.Stat(filepath.Join(self.mountpoint, rel))
       return err == nil
+    end
+
+    def localIsDir(rel) # (string) -> bool
+      st, err = os.Stat(filepath.Join(self.mountpoint, rel))
+      if err != nil
+        return false
+      end
+
+      return st.IsDir()
     end
 
     def remoteChanged(e) # (journal.Entry) -> bool

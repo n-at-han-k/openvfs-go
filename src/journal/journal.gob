@@ -22,8 +22,11 @@ module Journal
 
   SET_STATE_QUERY = "UPDATE files SET state = ?, pin_state = ? WHERE path = ?"
 
-  SET_SYNCED_QUERY = "UPDATE files SET state = ?, pin_state = ?, dirty = 0, sync_error = '', " +
-    "last_synced_etag = ?, last_synced_fileid = ?, last_synced_size = ?, last_synced_local_mtime = ?, last_synced_local_size = ? WHERE path = ?"
+  SET_SYNCED_QUERY = "INSERT INTO files (path, state, pin_state, dirty, sync_error, last_synced_etag, last_synced_fileid, last_synced_size, last_synced_local_mtime, last_synced_local_size) " +
+    "VALUES (?, ?, ?, 0, '', ?, ?, ?, ?, ?) " +
+    "ON CONFLICT(path) DO UPDATE SET state = excluded.state, pin_state = excluded.pin_state, dirty = 0, sync_error = '', " +
+    "last_synced_etag = excluded.last_synced_etag, last_synced_fileid = excluded.last_synced_fileid, last_synced_size = excluded.last_synced_size, " +
+    "last_synced_local_mtime = excluded.last_synced_local_mtime, last_synced_local_size = excluded.last_synced_local_size"
 
   SET_DIRTY_QUERY = "UPDATE files SET dirty = 1, sync_error = '' WHERE path = ?"
 
@@ -106,7 +109,7 @@ module Journal
 
     # SetSynced marks a path as cleanly synced with the given facts.
     def SetSynced(path, state, pinState, remoteEtag, remoteFileID, remoteSize, localMTime, localSize) # (string, int, int, string, string, int64, int64, int64) -> error
-      _, err = self.files.Exec(SET_SYNCED_QUERY, state, pinState, remoteEtag, remoteFileID, remoteSize, localMTime, localSize, path)
+      _, err = self.files.Exec(SET_SYNCED_QUERY, path, state, pinState, remoteEtag, remoteFileID, remoteSize, localMTime, localSize)
       return err
     end
 
