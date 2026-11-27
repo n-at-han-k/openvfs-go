@@ -50,7 +50,7 @@ module Main
     log.Info().Str("root", root).Str("mountpoint", mountpoint).Msg("mounted")
 
     go lambda {
-      ctx.Done().<<
+      ←ctx.Done()
       _ = server.Unmount()
     }.()
 

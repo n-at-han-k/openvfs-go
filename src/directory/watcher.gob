@@ -70,11 +70,19 @@ module Directory
     def run(ctx) # (context.Context)
       loop do
         case
-        when ctx.Done().<<
+        when ←.ctx.Done()
           return
-        when ev = self.w.Events.<<
+        when ev, ok = ←.self.w.Events
+          unless ok
+            return
+          end
+
           self.onEvent(ev)
-        when err = self.w.Errors.<<
+        when err, ok = ←.self.w.Errors
+          unless ok
+            return
+          end
+
           log.Warn().Err(err).Msg("fsnotify")
           self.onChange(Event.new(Kind: Rescan))
         end
