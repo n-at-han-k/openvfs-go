@@ -117,6 +117,8 @@ module Vfs
   end
 
   def NewFuseMount(root, mountpoint, owner, timeout, onEvent) # (string, string, string, time.Duration, func(MountEvent)) -> (*FuseMount, error)
+    log.Debug().Str("root", root).Str("mountpoint", mountpoint).Msg("mount: stat root")
+
     var :st, syscall.Stat_t
     if (err = syscall.Stat(root, @st))
       return nil, err
@@ -131,15 +133,21 @@ module Vfs
       onEvent:    onEvent
     )
 
+    log.Debug().Str("owner", owner).Msg("mount: claim root")
+
     if (err = m.claim())
       return nil, err
     end
+
+    log.Debug().Uint64("dev", uint64(st.Dev)).Msg("mount: build root node")
 
     rootData = @fs.LoopbackRoot.new(Path: root, Dev: uint64(st.Dev))
     node = @FuseNodeHandler.new(LoopbackNode: @fs.LoopbackNode.new(RootData: rootData), FuseMount: m)
     rootData.RootNode = node
 
     var :noCache, time.Duration
+
+    debug = log.Debug().Enabled()
 
     opts = @fs.Options.new(
       AttrTimeout:     @noCache,
@@ -148,14 +156,23 @@ module Vfs
       MountOptions: gofuse.MountOptions.new(
         Name: "openvfs",
         FsName: root,
-        Options: Array[string].new("auto_unmount")
+        Debug: debug
       )
     )
 
-    server, err = fs.Mount(mountpoint, node, opts)
-    if err != nil
+    if (err = os.MkdirAll(mountpoint, 0755))
       return nil, err
     end
+
+    log.Debug().Str("mountpoint", mountpoint).Bool("fuseDebug", debug).Msg("mount: calling fs.Mount")
+
+    server, err = fs.Mount(mountpoint, node, opts)
+    if err != nil
+      log.Debug().Err(err).Msg("mount: fs.Mount failed")
+      return nil, err
+    end
+
+    log.Debug().Msg("mount: fs.Mount returned, server serving")
 
     m.Server = server
 
@@ -173,8 +190,13 @@ module Vfs
 
     go lambda {
       ←.ctx.Done()
-      _ = m.Server.Unmount()
+      log.Debug().Str("mountpoint", mountpoint).Msg("mount: cancelled, unmounting")
+      if (err = m.Server.Unmount())
+        log.Warn().Err(err).Str("mountpoint", mountpoint).Msg("mount: unmount")
+      end
     }.()
+
+    log.Debug().Str("mountpoint", mountpoint).Msg("mount: waiting for server")
 
     m.Server.Wait()
 

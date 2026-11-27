@@ -3,6 +3,7 @@ require "context"
 require "encoding/json"
 require "fmt"
 require "net"
+require "os"
 require "strconv"
 require "strings"
 
@@ -36,6 +37,7 @@ module Main
 
   class Socket
     attr_accessor :path,     string
+    attr_accessor :listener, net.Listener
     attr_accessor :conn,     net.Conn
     attr_accessor :requests, Chan[vfs.MountEvent]
 
@@ -54,11 +56,35 @@ module Main
     end
 
     def RunListener(ctx, onEvent) # (context.Context, func(SocketEvent))
-      if self.conn == nil
+      if self.listener == nil
         return
       end
 
-      defer self.conn.Close()
+      defer self.listener.Close()
+      defer os.Remove(self.path)
+
+      go lambda {
+        ←.ctx.Done()
+        self.listener.Close()
+      }.()
+
+      loop do
+        c, err = self.listener.Accept()
+        if err
+          return
+        end
+
+        log.Info().Str("socket", self.path).Msg("client connected")
+        self.serve(ctx, c, onEvent)
+        log.Info().Str("socket", self.path).Msg("client gone")
+      end
+    end
+
+    def serve(ctx, c, onEvent) # (context.Context, net.Conn, func(SocketEvent))
+      defer c.Close()
+
+      self.conn = c
+      defer self.disconnect()
 
       if (err = self.send("VERSION", 0, "", "", ""))
         log.Warn().Err(err).Str("socket", self.path).Msg("socket api")
@@ -84,6 +110,16 @@ module Main
         when event = ←.self.requests
           self.forward(event)
         end
+      end
+    end
+
+    def disconnect # ()
+      self.conn = nil
+      self.clientPID = 0
+
+      self.pending.each do |id, reply|
+        reply.←.false
+        delete(self.pending, id)
       end
     end
 
@@ -215,13 +251,15 @@ module Main
       pending: make(Hash[int, Chan[bool]])
     )
 
-    c, err = net.Dial("unix", path)
+    _ = os.Remove(path)
+
+    l, err = net.Listen("unix", path)
     if err
       log.Warn().Err(err).Str("socket", path).Msg("socket api")
       return s
     end
 
-    s.conn = c
+    s.listener = l
 
     return s
   end
