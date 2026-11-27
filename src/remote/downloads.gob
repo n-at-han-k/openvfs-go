@@ -1,0 +1,325 @@
+require "context"
+require "io"
+require "os"
+require "path/filepath"
+require "sync"
+
+require "example.com/project/src/directory"
+require "example.com/project/src/journal"
+require "example.com/project/src/vfs"
+require "github.com/rs/zerolog/log"
+
+module Remote
+  var DownloadState = Class.new(uint8) do
+    protected def String # () -> string
+      case self
+      when DownloadQueued
+        return "Queued"
+      when DownloadRunning
+        return "Running"
+      when DownloadPaused
+        return "Paused"
+      when DownloadDone
+        return "Done"
+      when DownloadFailed
+        return "Failed"
+      when DownloadCanceled
+        return "Canceled"
+      end
+
+      return "Unknown"
+    end
+  end
+
+  const :DownloadQueued, 1
+  const :DownloadRunning, 2
+  const :DownloadPaused, 3
+  const :DownloadDone, 4
+  const :DownloadFailed, 5
+  const :DownloadCanceled, 6
+
+  class DownloadJob
+    attr_accessor :ID,      int
+    attr_accessor :Path,    string
+    attr_accessor :Rel,     string
+    attr_accessor :FileID,  string
+    attr_accessor :State,   DownloadState
+    attr_accessor :Reply,   Chan[bool]
+    attr_accessor :Offset,  int64
+    attr_accessor :TmpName, string
+    attr_accessor :pause,   Chan[Struct[]]
+    attr_accessor :resume,  Chan[Struct[]]
+    attr_accessor :cancel,  Chan[Struct[]]
+  end
+
+  class Downloader
+    attr_accessor :mountpoint, string
+    attr_accessor :journal, @@journal.Journal
+    attr_accessor :client, @@Client
+
+    attr_accessor :mu,   @@sync.Mutex
+    attr_accessor :next, int
+    attr_accessor :jobs, Hash[int, @@DownloadJob]
+
+    def Enqueue(ctx, event) # (context.Context, vfs.MountEvent)
+      self.mu.Lock()
+      self.next = self.next + 1
+      id = self.next
+
+      rel, err = filepath.Rel(self.mountpoint, event.Path)
+      if err
+        self.mu.Unlock()
+        log.Warn().Err(err).Str("path", event.Path).Msg("download")
+        event.Reply.←.false
+        return
+      end
+
+      job = @DownloadJob.new(
+        ID:     id,
+        Path:   event.Path,
+        Rel:    filepath.ToSlash(rel),
+        FileID: event.FileID,
+        State:  DownloadQueued,
+        Reply:  event.Reply,
+        pause:  make(Chan[Struct[]], 1),
+        resume: make(Chan[Struct[]], 1),
+        cancel: make(Chan[Struct[]], 1)
+      )
+
+      self.jobs[id] = job
+      self.mu.Unlock()
+
+      go self.run(ctx, job)
+    end
+
+    def Pause(id) # (int) -> bool
+      self.mu.Lock()
+      job, ok = self.jobs[id]
+      self.mu.Unlock()
+
+      unless ok
+        return false
+      end
+
+      signal = Struct[].new()
+      case
+      when job.pause.←.signal
+        return true
+      else
+        return false
+      end
+    end
+
+    def Resume(id) # (int) -> bool
+      self.mu.Lock()
+      job, ok = self.jobs[id]
+      self.mu.Unlock()
+
+      unless ok
+        return false
+      end
+
+      signal = Struct[].new()
+      case
+      when job.resume.←.signal
+        return true
+      else
+        return false
+      end
+    end
+
+    def Cancel(id) # (int) -> bool
+      self.mu.Lock()
+      job, ok = self.jobs[id]
+      self.mu.Unlock()
+
+      unless ok
+        return false
+      end
+
+      signal = Struct[].new()
+      case
+      when job.cancel.←.signal
+        return true
+      else
+        return false
+      end
+    end
+
+    def setState(job, state) # (*DownloadJob, DownloadState)
+      self.mu.Lock()
+      job.State = state
+      self.mu.Unlock()
+    end
+
+    def run(ctx, job) # (context.Context, *DownloadJob)
+      self.setState(job, DownloadRunning)
+
+      err = self.download(ctx, job)
+      if err
+        log.Warn().Err(err).Str("path", job.Path).Int("id", job.ID).Msg("download")
+        self.setState(job, DownloadFailed)
+        job.Reply.←.false
+        return
+      end
+
+      self.setState(job, DownloadDone)
+      job.Reply.←.true
+    end
+
+    def download(ctx, job) # (context.Context, *DownloadJob) -> error
+      tmp, err = os.CreateTemp(filepath.Dir(job.Path), ".openvfs-download-*")
+      if err
+        return err
+      end
+
+      job.TmpName = tmp.Name()
+      job.Offset = 0
+
+      err = self.copyWithControl(ctx, job, tmp)
+      if err
+        tmp.Close()
+        os.Remove(job.TmpName)
+        return err
+      end
+
+      if (err = tmp.Sync())
+        tmp.Close()
+        os.Remove(job.TmpName)
+        return err
+      end
+
+      if (err = tmp.Close())
+        os.Remove(job.TmpName)
+        return err
+      end
+
+      if (err = os.Chmod(job.TmpName, 0644))
+        os.Remove(job.TmpName)
+        return err
+      end
+
+      if (err = os.Rename(job.TmpName, job.Path))
+        os.Remove(job.TmpName)
+        return err
+      end
+
+      etag = ""
+      fileID = job.FileID
+      size = int64(0)
+
+      st, statErr = os.Stat(job.Path)
+      if statErr == nil
+        size = st.Size()
+      end
+
+      attr, ok = vfs.RemoteFileInfoFromAttributes(job.Path)
+      if ok && attr.IsOK()
+        if attr.Etag != ""
+          etag = attr.Etag
+        end
+
+        if attr.FileID != "" && fileID == ""
+          fileID = attr.FileID
+        end
+      end
+
+      data = vfs.PlaceholderData(etag, fileID, size, vfs.StateHydrated, vfs.PinInherited)
+      if (err = vfs.LocalPath(job.Path).SetXAttr(vfs.XAttrData, data, 0))
+        return err
+      end
+
+      if self.journal != nil
+        st, statErr = os.Stat(job.Path)
+        if statErr == nil
+          _ = self.journal.Record(job.Rel, directory.InodeOf(st), st.ModTime().Unix(), st.Size())
+          _ = self.journal.SetState(job.Rel, vfs.StateHydrated, vfs.PinInherited)
+        end
+      end
+
+      return nil
+    end
+
+    def copyWithControl(ctx, job, tmp) # (context.Context, *DownloadJob, *os.File) -> error
+      loop do
+        r, err = self.client.OpenRange(ctx, job.Rel, job.Offset)
+        if err
+          return err
+        end
+
+        buf = make(Array[byte], 32 * 1024)
+        stopped = false
+
+        loop do
+          case
+          when ←.ctx.Done()
+            r.Close()
+            return ctx.Err()
+          when ←.job.cancel
+            r.Close()
+            self.setState(job, DownloadCanceled)
+            return context.Canceled
+          when ←.job.pause
+            r.Close()
+            self.setState(job, DownloadPaused)
+            if (err = self.waitResume(ctx, job))
+              return err
+            end
+
+            stopped = true
+            break
+          else
+            n, readErr = r.Read(buf)
+            if n > 0
+              _, werr = tmp.Write(buf[...n])
+              if werr != nil
+                r.Close()
+                return werr
+              end
+
+              job.Offset = job.Offset + int64(n)
+            end
+
+            if readErr == io.EOF
+              r.Close()
+              return nil
+            end
+
+            if readErr != nil
+              r.Close()
+              return readErr
+            end
+          end
+        end
+
+        unless stopped
+          return nil
+        end
+      end
+    end
+
+    def waitResume(ctx, job) # (context.Context, *DownloadJob) -> error
+      loop do
+        case
+        when ←.ctx.Done()
+          return ctx.Err()
+        when ←.job.cancel
+          self.setState(job, DownloadCanceled)
+          return context.Canceled
+        when ←.job.resume
+          self.setState(job, DownloadRunning)
+          return nil
+        end
+      end
+    end
+  end
+
+  def NewDownloader(mountpoint, journal, client) # (string, *journal.Journal, *Client) -> *Downloader
+    return @Downloader.new(
+      mountpoint: mountpoint,
+      journal: journal,
+      client: client,
+      jobs: make(Hash[int, @@DownloadJob])
+    )
+  end
+end

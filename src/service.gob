@@ -102,19 +102,22 @@ module Main
 
       scanner = directory.NewScanner(self.Mountpoint, ignored, self.journal)
 
-      var :remoteScanner, @@remote.Scanner
-      if self.RemoteURL != ""
-        rc, err = remote.NewClient(self.RemoteURL, self.RemoteUser, self.RemotePass, self.RemoteInsecure)
-        if err
-          return err
-        end
-
-        remoteScanner = remote.NewScanner(rc)
+      if self.RemoteURL == ""
+        return errors.New("--remote is required")
       end
+
+      rc, err = remote.NewClient(self.RemoteURL, self.RemoteUser, self.RemotePass, self.RemoteInsecure)
+      if err
+        return err
+      end
+
+      remoteScanner = remote.NewScanner(rc)
 
       syncer = NewSyncer(scanner, self.journal, remoteScanner)
       go syncer.Run(ctx)
 
+      # Socket is for desktop-client updates/notifications, not hydration.
+      # Hydration is handled by the remote downloader.
       socket = NewSocket(self.SocketPath)
       go socket.RunListener(ctx, lambda { |event| # (SocketEvent)
         case event.Kind
@@ -142,8 +145,16 @@ module Main
         syncer.Request(SyncRequest.new(Cause: event))
       })
 
+      downloader = remote.NewDownloader(self.Mountpoint, self.journal, rc)
+
       go vfs.RunMount(ctx, self.Mountpoint, self.Owner, self.HydrationTimeout, lambda { |event| # (vfs.MountEvent)
-        socket.SendMessage(event)
+        case event.Kind
+        when vfs.Hydrate
+          downloader.Enqueue(ctx, event)
+        else
+          log.Warn().Str("kind", event.Kind.String()).Msg("unhandled mount event")
+          event.Reply.←.false
+        end
       })
 
       ←.ctx.Done()

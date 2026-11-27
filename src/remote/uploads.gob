@@ -1,0 +1,100 @@
+require "context"
+require "path/filepath"
+require "sync"
+
+require "example.com/project/src/journal"
+require "github.com/rs/zerolog/log"
+
+# Uploads use the TUS protocol via github.com/bdragon300/tusgo/v2.
+module Remote
+  var UploadState = Class.new(uint8) do
+    protected def String # () -> string
+      case self
+      when UploadQueued
+        return "Queued"
+      when UploadRunning
+        return "Running"
+      when UploadPaused
+        return "Paused"
+      when UploadDone
+        return "Done"
+      when UploadFailed
+        return "Failed"
+      when UploadCanceled
+        return "Canceled"
+      end
+
+      return "Unknown"
+    end
+  end
+
+  const :UploadQueued, 1
+  const :UploadRunning, 2
+  const :UploadPaused, 3
+  const :UploadDone, 4
+  const :UploadFailed, 5
+  const :UploadCanceled, 6
+
+  class UploadJob
+    attr_accessor :ID,     int
+    attr_accessor :Path,   string
+    attr_accessor :Rel,    string
+    attr_accessor :State,  UploadState
+    attr_accessor :pause,  Chan[Struct[]]
+    attr_accessor :resume, Chan[Struct[]]
+    attr_accessor :cancel, Chan[Struct[]]
+  end
+
+  class Uploader
+    attr_accessor :mountpoint, string
+    attr_accessor :journal, @@journal.Journal
+    attr_accessor :client, @@Client
+
+    attr_accessor :mu,   @@sync.Mutex
+    attr_accessor :next, int
+    attr_accessor :jobs, Hash[int, @@UploadJob]
+
+    def Enqueue(ctx, rel) # (context.Context, string) -> int
+      self.mu.Lock()
+      self.next = self.next + 1
+      id = self.next
+
+      job = @UploadJob.new(
+        ID:     id,
+        Rel:    rel,
+        Path:   filepath.Join(self.mountpoint, rel),
+        State:  UploadQueued,
+        pause:  make(Chan[Struct[]], 1),
+        resume: make(Chan[Struct[]], 1),
+        cancel: make(Chan[Struct[]], 1)
+      )
+
+      self.jobs[id] = job
+      self.mu.Unlock()
+
+      go self.run(ctx, job)
+      return id
+    end
+
+    def run(ctx, job) # (context.Context, *UploadJob)
+      self.setState(job, UploadRunning)
+      log.Debug().Str("path", job.Rel).Int("id", job.ID).Msg("upload: not implemented")
+      self.setState(job, UploadFailed)
+    end
+
+    def setState(job, state) # (*UploadJob, UploadState)
+      self.mu.Lock()
+      job.State = state
+      self.mu.Unlock()
+    end
+  end
+
+  def NewUploader(mountpoint, journal, client) # (string, *journal.Journal, *Client) -> *Uploader
+    return @Uploader.new(
+      mountpoint: mountpoint,
+      journal: journal,
+      client: client,
+      jobs: make(Hash[int, @@UploadJob])
+    )
+  end
+end

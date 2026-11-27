@@ -1,6 +1,9 @@
 require "context"
 require "crypto/tls"
+require "fmt"
+require "io"
 require "net/http"
+require "strings"
 
 require "github.com/migadu/go-webdav"
 
@@ -9,10 +12,41 @@ module Remote
   class Client
     attr_accessor :endpoint, string
     attr_accessor :wc, @@webdav.Client
+    attr_accessor :hc, webdav.HTTPClient
 
     # List returns the entries in dir (Depth 1), relative to the endpoint.
     def List(ctx, dir) # (context.Context, string) -> ([]webdav.FileInfo, error)
       return self.wc.ReadDir(ctx, dir, false)
+    end
+
+    # Open reads a remote file.
+    def Open(ctx, path) # (context.Context, string) -> (io.ReadCloser, error)
+      return self.wc.Open(ctx, path)
+    end
+
+    # OpenRange reads a remote file starting at offset, using HTTP Range.
+    def OpenRange(ctx, path, offset) # (context.Context, string, int64) -> (io.ReadCloser, error)
+      url = strings.TrimRight(self.endpoint, "/") + "/" + strings.TrimLeft(path, "/")
+      req, err = http.NewRequestWithContext(ctx, "GET", url, nil)
+      if err
+        return nil, err
+      end
+
+      if offset > 0
+        req.Header.Set("Range", fmt.Sprintf("bytes=%d-", offset))
+      end
+
+      res, err = self.hc.Do(req)
+      if err
+        return nil, err
+      end
+
+      if res.StatusCode != http.StatusOK && res.StatusCode != http.StatusPartialContent
+        res.Body.Close()
+        return nil, fmt.Errorf("webdav GET %s: %s", path, res.Status)
+      end
+
+      return res.Body, nil
     end
   end
 
@@ -29,6 +63,6 @@ module Remote
       return nil, err
     end
 
-    return @Client.new(endpoint: endpoint, wc: wc), nil
+    return @Client.new(endpoint: endpoint, wc: wc, hc: hc), nil
   end
 end

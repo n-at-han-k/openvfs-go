@@ -10,6 +10,8 @@ require "strings"
 require "example.com/project/src/vfs"
 require "github.com/rs/zerolog/log"
 
+# Socket is the desktop-client update/notification channel.
+# Hydration/downloads are handled by Remote::Downloader, not by this socket.
 module Main
   var SocketEventKind = Class.new(uint8) do
     protected def String # () -> string
