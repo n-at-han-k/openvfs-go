@@ -1,0 +1,81 @@
+require "os"
+require "strconv"
+
+require "github.com/vmihailenco/msgpack/v5"
+
+module Vfs
+  class PlaceHolderAttributes
+    attr_accessor :AbsolutePath, string
+    attr_accessor :Etag,         string
+    attr_accessor :FileID,       string
+    attr_accessor :Size,         uint64
+    attr_accessor :State,        int
+    attr_accessor :PinState,     int
+    attr_accessor :ok,           bool
+
+    def IsOK # () -> bool
+      return self.ok
+    end
+
+    # RealSize is the on-disk size. When the fuse layer provides
+    # user.openvfs.realsize that value wins; otherwise fall back to stat.
+    def RealSize # () -> uint64
+      data, err = GetXAttr(self.AbsolutePath, XAttrRealSize)
+      unless err
+        n, perr = strconv.ParseInt(string(data), 10, 64)
+        if perr == nil
+          return uint64(n)
+        end
+      end
+
+      st, err = os.Stat(self.AbsolutePath)
+      if err
+        return 0
+      end
+
+      return uint64(st.Size())
+    end
+  end
+
+  # PlaceHolderFromAttributes reads user.openvfs.data. ok is false when absent.
+  def PlaceHolderFromAttributes(path) # (string) -> (PlaceHolderAttributes, bool)
+    data, err = GetXAttr(path, XAttrData)
+    if err
+      return PlaceHolderAttributes.new(), false
+    end
+
+    var :m, Hash[string, any]
+    if (err = msgpack.Unmarshal(data, @m))
+      return PlaceHolderAttributes.new(), false
+    end
+
+    etag, _   = m["etag"].(string)
+    fileID, _ = m["fileid"].(string)
+    size, _   = m["size"].(uint64)
+    state, _  = m["state"].(uint64)
+    pin, _    = m["pinstate"].(uint64)
+
+    return PlaceHolderAttributes.new(
+      AbsolutePath: path,
+      Etag:         etag,
+      FileID:       fileID,
+      Size:         size,
+      State:        int(state),
+      PinState:     int(pin),
+      ok:           true
+    ), true
+  end
+
+  # DefaultPlaceHolderData is returned for files with no user.openvfs.data.
+  def DefaultPlaceHolderData # () -> []byte
+    b, _ = msgpack.Marshal(Hash[string, any].new(
+      "etag" => "",
+      "fileid" => "",
+      "size" => uint64(0),
+      "state" => uint64(StateHydrated),
+      "pinstate" => uint64(PinInherited)
+    ))
+
+    return b
+  end
+end

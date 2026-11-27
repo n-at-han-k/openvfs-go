@@ -1,0 +1,30 @@
+require "golang.org/x/sys/unix"
+
+module Vfs
+  def GetXAttr(path, name) # (string, string) -> ([]byte, error)
+    sz, err = unix.Lgetxattr(path, name, nil)
+    if err
+      return nil, err
+    end
+
+    if sz <= 0
+      return Array[byte].new, nil
+    end
+
+    buf = make(Array[byte], sz)
+    n, err = unix.Lgetxattr(path, name, buf)
+    if err
+      return nil, err
+    end
+
+    return buf[...n], nil
+  end
+
+  def SetXAttr(path, name, data, flags) # (string, string, []byte, int) -> error
+    return unix.Lsetxattr(path, name, data, flags)
+  end
+
+  def RemoveXAttr(path, name) # (string, string) -> error
+    return unix.Lremovexattr(path, name)
+  end
+end

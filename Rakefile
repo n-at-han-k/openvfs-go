@@ -23,6 +23,13 @@ task :build do
   sh "#{GOB} transpile src -o ./#{BUILD_DIR}/src"
   FileUtils.cp("go.mod", "#{BUILD_DIR}/go.mod")
   FileUtils.cp("go.sum", "#{BUILD_DIR}/go.sum")
+  # Gob 1.5.5 drops bare-type attr_accessor (Go embedding); inject fs.Inode.
+  mount_go = "#{BUILD_DIR}/src/vfs/mount.go"
+  if File.exist?(mount_go)
+    src = File.read(mount_go)
+    src = src.sub(/type Mount struct \{\n/, "type Mount struct {\n\tfs.Inode\n")
+    File.write(mount_go, src)
+  end
   cd BUILD_DIR do
     sh "go build -o openvfs ./src"
   end

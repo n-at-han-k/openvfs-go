@@ -1,0 +1,30 @@
+require "github.com/vmihailenco/msgpack/v5"
+
+module Vfs
+  class Registration
+    attr_accessor :Path,    string
+    attr_accessor :Owner,   string
+    attr_accessor :Version, int
+    attr_accessor :Error,   string
+
+    def IsOK # () -> bool
+      return self.Error == ""
+    end
+  end
+
+  def RegistrationFromAttributes(path) # (string) -> Registration
+    data, err = GetXAttr(path, XAttrRegistration)
+    if err
+      return Registration.new(Path: path, Error: "No registration info found")
+    end
+
+    var :m, Hash[string, any]
+    if (err = msgpack.Unmarshal(data, @m))
+      return Registration.new(Path: path, Error: err.Error())
+    end
+
+    owner, _ = m["owner"].(string)
+    ver, _   = m["version"].(uint64)
+    return Registration.new(Path: path, Owner: owner, Version: int(ver))
+  end
+end

@@ -16,7 +16,7 @@ require "github.com/spf13/cobra"
 module Main
   # run opens the journal, mounts root at mountpoint, watches root and serves
   # until the process is interrupted.
-  def run(root, mountpoint, dbPath, remoteURL, remoteUser, remotePass, remoteInsecure) # (string, string, string, string, string, string, bool) -> error
+  def run(root, mountpoint, dbPath, owner, remoteURL, remoteUser, remotePass, remoteInsecure) # (string, string, string, string, string, string, string, bool) -> error
     ctx, cancel = signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
     defer cancel()
 
@@ -67,9 +67,7 @@ module Main
       syncer.Request(directory.SyncRequest.new(Cause: event))
     })
 
-    m, err = vfs.NewMount(root, mountpoint, lambda { |event| # (directory.Event)
-      record(j, root, event)
-    })
+    m, err = vfs.NewMount(root, mountpoint, owner)
     if err
       return err
     end
@@ -165,17 +163,19 @@ module Main
           dbPath = filepath.Join(root, "sync-journal.db")
         end
 
+        owner, _ = cmd.Flags().GetString("owner")
         remoteURL, _ = cmd.Flags().GetString("remote")
         remoteUser, _ = cmd.Flags().GetString("remote-user")
         remotePass, _ = cmd.Flags().GetString("remote-pass")
         remoteInsecure, _ = cmd.Flags().GetBool("remote-insecure")
 
-        return run(root, mountpoint, dbPath, remoteURL, remoteUser, remotePass, remoteInsecure)
+        return run(root, mountpoint, dbPath, owner, remoteURL, remoteUser, remotePass, remoteInsecure)
       }
     )
 
     rootCmd.Flags().String("db", "", "journal database path")
     rootCmd.Flags().BoolP("verbose", "v", false, "log every change")
+    rootCmd.Flags().String("owner", "", "registered OpenVFS owner to verify")
     rootCmd.Flags().String("remote", "", "remote WebDAV base URL")
     rootCmd.Flags().String("remote-user", "admin", "remote WebDAV username")
     rootCmd.Flags().String("remote-pass", "admin", "remote WebDAV password")

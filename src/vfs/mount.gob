@@ -1,24 +1,39 @@
 require "context"
+require "fmt"
 require "os"
 require "os/exec"
 require "path/filepath"
+require "strconv"
+require "sync/atomic"
 require "syscall"
+require "time"
 require "unsafe"
 
-require "example.com/project/src/directory"
 require "github.com/hanwen/go-fuse/v2/fs"
 require "github.com/hanwen/go-fuse/v2/fuse", gofuse
 require "golang.org/x/sys/unix"
 
 module Vfs
-  # Mount is a live FUSE mount and the root filesystem node.
+  # Mount is an OpenVFS FUSE overlay. It serves backing files normally, but
+  # intercepts opens of dehydrated placeholders and asks the desktop client to
+  # hydrate them over the socket API.
   class Mount
     attr_accessor fs.Inode
-    attr_accessor :Root, string
-    attr_accessor :Mountpoint, string
-    attr_accessor :PID, int
-    attr_accessor :Server, @@gofuse.Server
-    attr_accessor :onChange, Proc[directory.Event]
+    attr_accessor :Root,             string
+    attr_accessor :Mountpoint,       string
+    attr_accessor :Owner,            string
+    attr_accessor :PID,              int
+    attr_accessor :Server,           @@gofuse.Server
+    attr_accessor :Jobs,             @@SharedMap
+    attr_accessor :Socket,           @@SocketThread
+    attr_accessor :HydrationTimeout, time.Duration
+    attr_accessor :AppsNoHydrateFull,     Array[string]
+    attr_accessor :AppsNoHydrateEndsWith, Array[string]
+    attr_accessor :TransferID,       atomic.Int32
+
+    def PathOnDisk # () -> string
+      return filepath.Join(self.Root, self.Path(nil))
+    end
 
     def Unmount # () -> error
       return self.Server.Unmount()
@@ -28,150 +43,116 @@ module Vfs
       self.Server.Wait()
     end
 
-    def emit(kind, rel) # (directory.EventKind, string)
-      if self.onChange != nil
-        self.onChange(directory.Event.new(Kind: kind, Path: rel))
+    # --- hydration helpers ---
+
+    def blockedToOpen(app) # (string) -> bool
+      self.AppsNoHydrateFull.each do |_, name|
+        if app == name
+          return true
+        end
+      end
+
+      self.AppsNoHydrateEndsWith.each do |_, suffix|
+        if len(app) >= len(suffix) && app[len(app)-len(suffix)...] == suffix
+          return true
+        end
+      end
+
+      return false
+    end
+
+    def callerBelongsToDesktopClient(caller) # (*gofuse.Caller) -> bool
+      pid = self.Jobs.DesktopClientPID()
+      if pid <= 0
+        return false
+      end
+
+      if int64(caller.Pid) == pid
+        return true
+      end
+
+      # FUSE reports TID; desktop client reports PID. Check /proc/<pid>/task/<tid>.
+      _, err = os.Stat(fmt.Sprintf("/proc/%d/task/%d", pid, caller.Pid))
+      return err == nil
+    end
+
+    def requestHydration(caller, p, attr) # (*gofuse.Caller, string, PlaceHolderAttributes) -> syscall.Errno
+      opener = fmt.Sprintf("pid:%d", caller.Pid)
+      if self.blockedToOpen(opener)
+        return syscall.EPERM
+      end
+
+      id = int(self.TransferID.Add(1))
+      msg = @MsgData.new(
+        Msg: "V2/HYDRATE_FILE",
+        File: p,
+        FileID: attr.FileID,
+        ID: id,
+        Requester: opener
+      )
+
+      self.Jobs.Insert(id, HydJob.new(State: HydRunning))
+      unless self.Socket.PostMsg(msg)
+        self.Jobs.Remove(id)
+        return syscall.EIO
+      end
+
+      result = self.Jobs.WaitForJob(id, self.HydrationTimeout)
+      self.Jobs.Remove(id)
+
+      case result
+      when HydResultSucceeded
+        return 0
+      when HydResultTimedOut
+        return syscall.ETIMEDOUT
+      else
+        return syscall.EIO
       end
     end
 
-    # --- FUSE operations ---
-
-    def Lookup(ctx, name, out) # (context.Context, string, *gofuse.EntryOut) -> (*fs.Inode, syscall.Errno)
-      p = filepath.Join(self.Root, filepath.Join(self.Path(nil), name))
-      var :st, unix.Stat_t
-      err = unix.Lstat(p, @st)
-      if err
-        return nil, fs.ToErrno(err)
-      end
-      out.Attr.FromStat(@@syscall.Stat_t.(unsafe.Pointer(@st)))
-      child = @Mount.new(Root: self.Root, onChange: self.onChange)
-      return self.NewInode(ctx, child, fs.StableAttr.new(Mode: uint32(st.Mode), Ino: st.Ino)), 0
-    end
+    # --- FUSE: metadata ---
 
     def Getattr(ctx, f, out) # (context.Context, fs.FileHandle, *gofuse.AttrOut) -> syscall.Errno
+      p = self.PathOnDisk()
       var :st, unix.Stat_t
-      err = unix.Lstat(filepath.Join(self.Root, self.Path(nil)), @st)
-      if err
+      if (err = unix.Lstat(p, @st))
         return fs.ToErrno(err)
       end
-      out.Attr.FromStat(@@syscall.Stat_t.(unsafe.Pointer(@st)))
-      return 0
-    end
 
-    def Readdir(ctx) # (context.Context) -> (fs.DirStream, syscall.Errno)
-      entries, err = os.ReadDir(filepath.Join(self.Root, self.Path(nil)))
-      if err
-        return nil, fs.ToErrno(err)
-      end
-      var :dirEntries, Array[gofuse.DirEntry]
-      entries.each do |_, e|
-        info, ierr = e.Info()
-        if ierr != nil
-          next
+      out.Attr.FromStat(@@syscall.Stat_t.(unsafe.Pointer(@st)))
+
+      if st.Mode & syscall.S_IFDIR == 0 && st.Size == 0
+        attr, ok = PlaceHolderFromAttributes(p)
+        if ok && attr.IsOK() && attr.State == StateDeHydrated
+          out.Attr.Size = attr.Size
         end
-        dirEntries = append(dirEntries, gofuse.DirEntry.new(Name: e.Name(), Mode: uint32(info.Mode())))
       end
-      return fs.NewListDirStream(dirEntries), 0
-    end
 
-    def Open(ctx, flags) # (context.Context, uint32) -> (fs.FileHandle, uint32, syscall.Errno)
-      f, err = os.OpenFile(filepath.Join(self.Root, self.Path(nil)), int(flags), 0)
-      if err
-        return nil, 0, fs.ToErrno(err)
-      end
-      return fs.NewLoopbackFileFromOS(f), gofuse.FOPEN_KEEP_CACHE, 0
-    end
-
-    def Create(ctx, name, flags, mode, out) # (context.Context, string, uint32, uint32, *gofuse.EntryOut) -> (*fs.Inode, fs.FileHandle, uint32, syscall.Errno)
-      p = filepath.Join(self.Root, filepath.Join(self.Path(nil), name))
-      f, err = os.OpenFile(p, int(flags)|os.O_CREATE, os.FileMode(mode))
-      if err
-        return nil, nil, 0, fs.ToErrno(err)
-      end
-      var :st, unix.Stat_t
-      serr = unix.Lstat(p, @st)
-      if serr != nil
-        f.Close()
-        return nil, nil, 0, fs.ToErrno(serr)
-      end
-      out.Attr.FromStat(@@syscall.Stat_t.(unsafe.Pointer(@st)))
-      child = @Mount.new(Root: self.Root, onChange: self.onChange)
-      inode = self.NewInode(ctx, child, fs.StableAttr.new(Mode: uint32(st.Mode), Ino: st.Ino))
-      self.emit(directory.Create, filepath.ToSlash(filepath.Join(self.Path(nil), filepath.Base(p))))
-      return inode, fs.NewLoopbackFileFromOS(f), gofuse.FOPEN_KEEP_CACHE, 0
-    end
-
-    def Mkdir(ctx, name, mode, out) # (context.Context, string, uint32, *gofuse.EntryOut) -> (*fs.Inode, syscall.Errno)
-      p = filepath.Join(self.Root, filepath.Join(self.Path(nil), name))
-      err = os.Mkdir(p, os.FileMode(mode))
-      if err
-        return nil, fs.ToErrno(err)
-      end
-      var :st, unix.Stat_t
-      serr = unix.Lstat(p, @st)
-      if serr != nil
-        return nil, fs.ToErrno(serr)
-      end
-      out.Attr.FromStat(@@syscall.Stat_t.(unsafe.Pointer(@st)))
-      child = @Mount.new(Root: self.Root, onChange: self.onChange)
-      inode = self.NewInode(ctx, child, fs.StableAttr.new(Mode: uint32(st.Mode), Ino: st.Ino))
-      self.emit(directory.Create, filepath.ToSlash(filepath.Join(self.Path(nil), filepath.Base(p))))
-      return inode, 0
-    end
-
-    def Unlink(ctx, name) # (context.Context, string) -> syscall.Errno
-      p = filepath.Join(self.Root, filepath.Join(self.Path(nil), name))
-      err = syscall.Unlink(p)
-      if err
-        return fs.ToErrno(err)
-      end
-      self.emit(directory.Remove, filepath.ToSlash(filepath.Join(self.Path(nil), filepath.Base(p))))
-      return 0
-    end
-
-    def Rmdir(ctx, name) # (context.Context, string) -> syscall.Errno
-      p = filepath.Join(self.Root, filepath.Join(self.Path(nil), name))
-      err = syscall.Rmdir(p)
-      if err
-        return fs.ToErrno(err)
-      end
-      self.emit(directory.Remove, filepath.ToSlash(filepath.Join(self.Path(nil), filepath.Base(p))))
-      return 0
-    end
-
-    def Rename(ctx, name, newParent, newName, flags) # (context.Context, string, fs.InodeEmbedder, string, uint32) -> syscall.Errno
-      p = filepath.Join(self.Root, filepath.Join(self.Path(nil), name))
-      np, ok = newParent.(@@Mount)
-      if !ok
-        return syscall.EXDEV
-      end
-      newP = filepath.Join(filepath.Join(self.Root, np.Path(nil)), newName)
-      err = syscall.Rename(p, newP)
-      if err
-        return fs.ToErrno(err)
-      end
-      self.emit(directory.Rename, filepath.ToSlash(filepath.Join(self.Path(nil), filepath.Base(p))))
       return 0
     end
 
     def Setattr(ctx, f, input, out) # (context.Context, fs.FileHandle, *gofuse.SetAttrIn, *gofuse.AttrOut) -> syscall.Errno
-      p = filepath.Join(self.Root, self.Path(nil))
+      p = self.PathOnDisk()
+
       if (mode, ok = input.GetMode())
         if (err = syscall.Chmod(p, mode))
           return fs.ToErrno(err)
         end
       end
+
       if (uid, ok = input.GetUID())
         gid, _ = input.GetGID()
         if (err = syscall.Chown(p, int(uid), int(gid)))
           return fs.ToErrno(err)
         end
       end
+
       if (size, ok = input.GetSize())
         if (err = syscall.Truncate(p, int64(size)))
           return fs.ToErrno(err)
         end
       end
+
       atime, aok = input.GetATime()
       mtime, mok = input.GetMTime()
       if aok || mok
@@ -190,33 +171,212 @@ module Vfs
           return fs.ToErrno(err)
         end
       end
-      self.emit(directory.Write, filepath.ToSlash(self.Path(nil)))
+
       return self.Getattr(ctx, f, out)
     end
 
+    # --- FUSE: namespace ---
+
+    def Lookup(ctx, name, out) # (context.Context, string, *gofuse.EntryOut) -> (*fs.Inode, syscall.Errno)
+      p = filepath.Join(self.Root, filepath.Join(self.Path(nil), name))
+      var :st, unix.Stat_t
+      if (err = unix.Lstat(p, @st))
+        return nil, fs.ToErrno(err)
+      end
+
+      out.Attr.FromStat(@@syscall.Stat_t.(unsafe.Pointer(@st)))
+      child = self.newChild()
+      return self.NewInode(ctx, child, fs.StableAttr.new(Mode: uint32(st.Mode), Ino: st.Ino)), 0
+    end
+
+    def Readdir(ctx) # (context.Context) -> (fs.DirStream, syscall.Errno)
+      entries, err = os.ReadDir(self.PathOnDisk())
+      if err
+        return nil, fs.ToErrno(err)
+      end
+
+      var :dirEntries, Array[gofuse.DirEntry]
+      entries.each do |_, e|
+        info, ierr = e.Info()
+        if ierr != nil
+          next
+        end
+        dirEntries = append(dirEntries, gofuse.DirEntry.new(Name: e.Name(), Mode: uint32(info.Mode())))
+      end
+
+      return fs.NewListDirStream(dirEntries), 0
+    end
+
     def Readlink(ctx) # (context.Context) -> ([]byte, syscall.Errno)
-      target, err = os.Readlink(filepath.Join(self.Root, self.Path(nil)))
+      target, err = os.Readlink(self.PathOnDisk())
       if err
         return nil, fs.ToErrno(err)
       end
       return Array[byte].(target), 0
     end
+
+    # --- FUSE: file ops ---
+
+    def Open(ctx, flags) # (context.Context, uint32) -> (fs.FileHandle, uint32, syscall.Errno)
+      p = self.PathOnDisk()
+      caller, _ = gofuse.FromContext(ctx)
+
+      unless self.callerBelongsToDesktopClient(caller)
+        attr, ok = PlaceHolderFromAttributes(p)
+        if ok && attr.IsOK() && attr.State == StateDeHydrated
+          if (errno = self.requestHydration(caller, p, attr))
+            return nil, 0, errno
+          end
+        end
+      end
+
+      f, err = os.OpenFile(p, int(flags), 0)
+      if err
+        return nil, 0, fs.ToErrno(err)
+      end
+
+      return fs.NewLoopbackFileFromOS(f), gofuse.FOPEN_KEEP_CACHE, 0
+    end
+
+    def Create(ctx, name, flags, mode, out) # (context.Context, string, uint32, uint32, *gofuse.EntryOut) -> (*fs.Inode, fs.FileHandle, uint32, syscall.Errno)
+      p = filepath.Join(self.Root, filepath.Join(self.Path(nil), name))
+      f, err = os.OpenFile(p, int(flags)|os.O_CREATE, os.FileMode(mode))
+      if err
+        return nil, nil, 0, fs.ToErrno(err)
+      end
+
+      var :st, unix.Stat_t
+      if (serr = unix.Lstat(p, @st))
+        f.Close()
+        return nil, nil, 0, fs.ToErrno(serr)
+      end
+
+      out.Attr.FromStat(@@syscall.Stat_t.(unsafe.Pointer(@st)))
+      child = self.newChild()
+      inode = self.NewInode(ctx, child, fs.StableAttr.new(Mode: uint32(st.Mode), Ino: st.Ino))
+      return inode, fs.NewLoopbackFileFromOS(f), gofuse.FOPEN_KEEP_CACHE, 0
+    end
+
+    def Mkdir(ctx, name, mode, out) # (context.Context, string, uint32, *gofuse.EntryOut) -> (*fs.Inode, syscall.Errno)
+      p = filepath.Join(self.Root, filepath.Join(self.Path(nil), name))
+      if (err = os.Mkdir(p, os.FileMode(mode)))
+        return nil, fs.ToErrno(err)
+      end
+
+      var :st, unix.Stat_t
+      if (serr = unix.Lstat(p, @st))
+        return nil, fs.ToErrno(serr)
+      end
+
+      out.Attr.FromStat(@@syscall.Stat_t.(unsafe.Pointer(@st)))
+      child = self.newChild()
+      return self.NewInode(ctx, child, fs.StableAttr.new(Mode: uint32(st.Mode), Ino: st.Ino)), 0
+    end
+
+    def Unlink(ctx, name) # (context.Context, string) -> syscall.Errno
+      p = filepath.Join(self.Root, filepath.Join(self.Path(nil), name))
+      return fs.ToErrno(syscall.Unlink(p))
+    end
+
+    def Rmdir(ctx, name) # (context.Context, string) -> syscall.Errno
+      p = filepath.Join(self.Root, filepath.Join(self.Path(nil), name))
+      return fs.ToErrno(syscall.Rmdir(p))
+    end
+
+    def Rename(ctx, name, newParent, newName, flags) # (context.Context, string, fs.InodeEmbedder, string, uint32) -> syscall.Errno
+      p = filepath.Join(self.Root, filepath.Join(self.Path(nil), name))
+      np, ok = newParent.(@@Mount)
+      unless ok
+        return syscall.EXDEV
+      end
+      newP = filepath.Join(filepath.Join(self.Root, np.Path(nil)), newName)
+      return fs.ToErrno(syscall.Rename(p, newP))
+    end
+
+    # --- FUSE: xattrs ---
+
+    def Getxattr(ctx, attr, dest) # (context.Context, string, []byte) -> (uint32, syscall.Errno)
+      p = self.PathOnDisk()
+
+      if attr == XAttrRealSize
+        var :st, unix.Stat_t
+        if (err = unix.Lstat(p, @st))
+          return 0, fs.ToErrno(err)
+        end
+        return copyXattr(dest, Array[byte].(strconv.FormatInt(st.Size, 10)))
+      end
+
+      sz, err = unix.Lgetxattr(p, attr, dest)
+      if err == unix.ENODATA && attr == XAttrData
+        return copyXattr(dest, DefaultPlaceHolderData())
+      end
+      if err
+        return 0, fs.ToErrno(err)
+      end
+      return uint32(sz), 0
+    end
+
+    def Setxattr(ctx, attr, data, flags) # (context.Context, string, []byte, uint32) -> syscall.Errno
+      return fs.ToErrno(unix.Lsetxattr(self.PathOnDisk(), attr, data, int(flags)))
+    end
+
+    def Listxattr(ctx, dest) # (context.Context, []byte) -> (uint32, syscall.Errno)
+      sz, err = unix.Llistxattr(self.PathOnDisk(), dest)
+      if err
+        return 0, fs.ToErrno(err)
+      end
+      return uint32(sz), 0
+    end
+
+    def Removexattr(ctx, attr) # (context.Context, string) -> syscall.Errno
+      return fs.ToErrno(unix.Lremovexattr(self.PathOnDisk(), attr))
+    end
+
+    def newChild # () -> *Mount
+      return @Mount.new(
+        Root: self.Root, Owner: self.Owner,
+        Jobs: self.Jobs, Socket: self.Socket,
+        HydrationTimeout: self.HydrationTimeout,
+        AppsNoHydrateFull: self.AppsNoHydrateFull,
+        AppsNoHydrateEndsWith: self.AppsNoHydrateEndsWith
+      )
+    end
   end
 
-  # NewMount mounts root at mountpoint and returns a Mount.
-  def NewMount(root, mountpoint, onChange) # (string, string, func(directory.Event)) -> (*Mount, error)
+  def copyXattr(dest, data) # ([]byte, []byte) -> (uint32, syscall.Errno)
+    if len(dest) == 0
+      return uint32(len(data)), 0
+    end
+    if len(dest) < len(data)
+      return 0, syscall.ERANGE
+    end
+    copy(dest, data)
+    return uint32(len(data)), 0
+  end
+
+  # NewMount mounts an OpenVFS backing root at mountpoint.
+  # When owner is non-empty, the backing root must be registered to that owner.
+  def NewMount(root, mountpoint, owner) # (string, string, string) -> (*Mount, error)
+    if owner != ""
+      info = RegistrationFromAttributes(root)
+      unless info.IsOK() && info.Owner == owner
+        return nil, fmt.Errorf("mount point %s is not owned by %s: %s", root, owner, info.Error)
+      end
+    end
+
     _ = exec.Command("fusermount3", "-u", mountpoint).Run()
     _ = exec.Command("fusermount", "-u", mountpoint).Run()
 
-    m = @Mount.new(Root: root, Mountpoint: mountpoint, PID: os.Getpid(), onChange: onChange)
-
-    opts = @fs.Options.new(
-      MountOptions: gofuse.MountOptions.new(
-        Name: "openvfs",
-        FsName: root
-      )
+    m = @Mount.new(
+      Root: root, Mountpoint: mountpoint, Owner: owner, PID: os.Getpid(),
+      Jobs: NewSharedMap(),
+      Socket: NewSocketThread("SocketThread", nil),
+      HydrationTimeout: 300 * time.Second
     )
+    m.Socket.Jobs = m.Jobs
+    m.TransferID.Store(12)
 
+    opts = @fs.Options.new(MountOptions: gofuse.MountOptions.new(Name: "openvfs", FsName: root))
     server, err = fs.Mount(mountpoint, m, opts)
     if err
       return nil, err

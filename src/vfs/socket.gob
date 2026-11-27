@@ -1,0 +1,38 @@
+require "sync/atomic"
+
+module Vfs
+  # MsgData is a hydration request sent to the desktop client.
+  class MsgData
+    attr_accessor :Msg,       string
+    attr_accessor :File,      string
+    attr_accessor :FileID,    string
+    attr_accessor :ID,        int
+    attr_accessor :Requester, string
+  end
+
+  # SocketThread owns the desktop-client socket. FUSE open() posts hydration
+  # requests; the socket thread receives responses and updates SharedMap jobs.
+  class SocketThread
+    attr_accessor :Name,      string
+    attr_accessor :Jobs,      @@SharedMap
+    attr_accessor :SocketPath, string
+
+    def CreateThread(socketPath) # (string) -> bool
+      self.SocketPath = socketPath
+      # TODO: connect to desktop client socket, start read loop.
+      return true
+    end
+
+    def PostMsg(msg) # (*MsgData) -> bool
+      # TODO: encode and write V2/HYDRATE_FILE request to socket.
+      return false
+    end
+
+    def ExitThread # ()
+    end
+  end
+
+  def NewSocketThread(name, jobs) # (string, *SharedMap) -> *SocketThread
+    return @SocketThread.new(Name: name, Jobs: jobs)
+  end
+end
