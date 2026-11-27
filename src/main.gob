@@ -72,7 +72,7 @@ module Main
 
   # record folds one watcher event into the journal.
   def record(j, root, event) # (*journal.Journal, string, directory.Event)
-    log.Debug().Str("kind", event.Kind.String()).Str("path", event.Path).Msg("change")
+    log.Info().Str("kind", event.Kind.String()).Str("path", event.Path).Msg("change")
 
     if event.Kind == directory.Rescan
       return
