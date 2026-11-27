@@ -1,0 +1,18 @@
+require "fmt"
+
+require "github.com/spf13/cobra"
+
+module Cmd
+  def Status # () -> *cobra.Command
+    cmd = @cobra.Command.new(
+      Use: "status",
+      Short: "Show overall OpenVFS status",
+      RunE: lambda { |c, args| # (*cobra.Command, []string) -> error
+        fmt.Println("TODO status")
+        return nil
+      }
+    )
+
+    return cmd
+  end
+end

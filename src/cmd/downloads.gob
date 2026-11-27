@@ -1,0 +1,83 @@
+require "fmt"
+
+require "github.com/spf13/cobra"
+
+module Cmd
+  def Downloads # () -> *cobra.Command
+    cmd = @cobra.Command.new(
+      Use: "downloads",
+      Short: "Manage downloads for a mount",
+    )
+
+    cmd.PersistentFlags().String("mount", "", "mount name or id")
+    cmd.AddCommand(downloadsLs())
+    cmd.AddCommand(downloadsPause())
+    cmd.AddCommand(downloadsResume())
+    cmd.AddCommand(downloadsCancel())
+
+    return cmd
+  end
+
+  def downloadsLs # () -> *cobra.Command
+    cmd = @cobra.Command.new(
+      Use: "ls",
+      Aliases: Array[string].new("list"),
+      Short: "List downloads",
+      RunE: lambda { |c, args| # (*cobra.Command, []string) -> error
+        mount, _ = c.Flags().GetString("mount")
+        if mount == ""
+          mount, _ = c.Parent().PersistentFlags().GetString("mount")
+        end
+        fmt.Printf("TODO downloads ls mount=%s\n", mount)
+        return nil
+      }
+    )
+
+    return cmd
+  end
+
+  def downloadsPause # () -> *cobra.Command
+    cmd = @cobra.Command.new(
+      Use: "pause <id>",
+      Short: "Pause a download",
+      Args: cobra.ExactArgs(1),
+      RunE: lambda { |c, args| # (*cobra.Command, []string) -> error
+        mount, _ = c.Parent().PersistentFlags().GetString("mount")
+        fmt.Printf("TODO downloads pause mount=%s id=%s\n", mount, args[0])
+        return nil
+      }
+    )
+
+    return cmd
+  end
+
+  def downloadsResume # () -> *cobra.Command
+    cmd = @cobra.Command.new(
+      Use: "resume <id>",
+      Short: "Resume a download",
+      Args: cobra.ExactArgs(1),
+      RunE: lambda { |c, args| # (*cobra.Command, []string) -> error
+        mount, _ = c.Parent().PersistentFlags().GetString("mount")
+        fmt.Printf("TODO downloads resume mount=%s id=%s\n", mount, args[0])
+        return nil
+      }
+    )
+
+    return cmd
+  end
+
+  def downloadsCancel # () -> *cobra.Command
+    cmd = @cobra.Command.new(
+      Use: "cancel <id>",
+      Short: "Cancel a download",
+      Args: cobra.ExactArgs(1),
+      RunE: lambda { |c, args| # (*cobra.Command, []string) -> error
+        mount, _ = c.Parent().PersistentFlags().GetString("mount")
+        fmt.Printf("TODO downloads cancel mount=%s id=%s\n", mount, args[0])
+        return nil
+      }
+    )
+
+    return cmd
+  end
+end

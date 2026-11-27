@@ -1,0 +1,116 @@
+require "encoding/json"
+require "errors"
+require "fmt"
+require "os"
+require "strings"
+
+module Mounts
+  class Config
+    attr_accessor :Name,           string # `json:"name"`
+    attr_accessor :Root,           string # `json:"root"`
+    attr_accessor :Mountpoint,     string # `json:"mountpoint"`
+    attr_accessor :Remote,         string # `json:"remote"`
+    attr_accessor :RemoteUser,     string # `json:"remote_user"`
+    attr_accessor :RemotePass,     string # `json:"remote_pass"`
+    attr_accessor :RemoteInsecure, bool   # `json:"remote_insecure"`
+    attr_accessor :Owner,          string # `json:"owner"`
+  end
+
+  def ValidateName(name) # (string) -> error
+    if name == ""
+      return errors.New("mount name is required")
+    end
+
+    if strings.Contains(name, "/") || strings.Contains(name, "\\") || strings.Contains(name, "..")
+      return fmt.Errorf("invalid mount name: %s", name)
+    end
+
+    return nil
+  end
+
+  def SaveConfig(cfg) # (Config) -> error
+    if (err = ValidateName(cfg.Name))
+      return err
+    end
+
+    if (err = os.MkdirAll(MountConfigDir(), 0755))
+      return err
+    end
+
+    b, err = json.MarshalIndent(cfg, "", "  ")
+    if err
+      return err
+    end
+
+    return os.WriteFile(MountConfigPath(cfg.Name), b, 0600)
+  end
+
+  def LoadConfig(name) # (string) -> (Config, error)
+    if (err = ValidateName(name))
+      return Config.new(), err
+    end
+
+    b, err = os.ReadFile(MountConfigPath(name))
+    if err
+      return Config.new(), err
+    end
+
+    var :cfg, Config
+    if (err = json.Unmarshal(b, @cfg))
+      return Config.new(), err
+    end
+
+    if cfg.Name == ""
+      cfg.Name = name
+    end
+
+    return cfg, nil
+  end
+
+  def ListConfigs # () -> ([]Config, error)
+    dir = MountConfigDir()
+    entries, err = os.ReadDir(dir)
+    if err
+      if os.IsNotExist(err)
+        return Array[Config].new, nil
+      end
+
+      return nil, err
+    end
+
+    configs = Array[Config].new
+    entries.each do |_, e|
+      if e.IsDir()
+        next
+      end
+
+      name = e.Name()
+      if !strings.HasSuffix(name, ".json")
+        next
+      end
+
+      mountName = strings.TrimSuffix(name, ".json")
+      cfg, err = LoadConfig(mountName)
+      if err
+        next
+      end
+
+      configs = append(configs, cfg)
+    end
+
+    return configs, nil
+  end
+
+  def RemoveConfig(name) # (string) -> error
+    if (err = ValidateName(name))
+      return err
+    end
+
+    err = os.Remove(MountConfigPath(name))
+    if err != nil && os.IsNotExist(err)
+      return nil
+    end
+
+    return err
+  end
+end

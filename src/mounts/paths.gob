@@ -1,0 +1,79 @@
+require "os"
+require "path/filepath"
+
+module Mounts
+  def ConfigHome # () -> string
+    dir = os.Getenv("XDG_CONFIG_HOME")
+    if dir == ""
+      home, _ = os.UserHomeDir()
+      dir = filepath.Join(home, ".config")
+    end
+
+    return filepath.Join(dir, "openvfs")
+  end
+
+  def StateHome # () -> string
+    dir = os.Getenv("XDG_STATE_HOME")
+    if dir == ""
+      home, _ = os.UserHomeDir()
+      dir = filepath.Join(home, ".local", "state")
+    end
+
+    return filepath.Join(dir, "openvfs")
+  end
+
+  def DataHome # () -> string
+    dir = os.Getenv("XDG_DATA_HOME")
+    if dir == ""
+      home, _ = os.UserHomeDir()
+      dir = filepath.Join(home, ".local", "share")
+    end
+
+    return filepath.Join(dir, "openvfs")
+  end
+
+  def RuntimeHome # () -> string
+    dir = os.Getenv("XDG_RUNTIME_DIR")
+    if dir == ""
+      dir = StateHome()
+    end
+
+    return filepath.Join(dir, "openvfs")
+  end
+
+  def MountConfigDir # () -> string
+    return filepath.Join(ConfigHome(), "mounts")
+  end
+
+  def MountStateDir(name) # (string) -> string
+    return filepath.Join(StateHome(), "mounts", name)
+  end
+
+  def MountDataDir(name) # (string) -> string
+    return filepath.Join(DataHome(), "mounts", name)
+  end
+
+  def MountRuntimeDir(name) # (string) -> string
+    return filepath.Join(RuntimeHome(), "mounts", name)
+  end
+
+  def MountConfigPath(name) # (string) -> string
+    return filepath.Join(MountConfigDir(), name + ".json")
+  end
+
+  def MountSocketPath(name) # (string) -> string
+    return filepath.Join(MountRuntimeDir(name), "control.sock")
+  end
+
+  def MountPIDPath(name) # (string) -> string
+    return filepath.Join(MountStateDir(name), "pid")
+  end
+
+  def MountLogPath(name) # (string) -> string
+    return filepath.Join(MountStateDir(name), "openvfs.log")
+  end
+
+  def MountDBPath(name) # (string) -> string
+    return filepath.Join(MountDataDir(name), "journal.db")
+  end
+end

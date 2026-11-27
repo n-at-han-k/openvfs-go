@@ -1,0 +1,223 @@
+require "fmt"
+require "net"
+require "os"
+require "os/exec"
+require "strconv"
+require "strings"
+require "syscall"
+require "time"
+
+module Mounts
+  var Status = Struct.new(
+    Name: string,
+    Running: bool,
+    PID: int,
+    Socket: string,
+    SocketAlive: bool,
+    Mountpoint: string,
+    Remote: string,
+    Error: string
+  )
+
+  def EnsureDirs(name) # (string) -> error
+    dirs = Array[string].new(MountStateDir(name), MountDataDir(name), MountRuntimeDir(name))
+    dirs.each do |_, d|
+      if (err = os.MkdirAll(d, 0755))
+        return err
+      end
+    end
+
+    return nil
+  end
+
+  def WritePID(name, pid) # (string, int) -> error
+    if (err = EnsureDirs(name))
+      return err
+    end
+
+    return os.WriteFile(MountPIDPath(name), Array[byte].(strconv.Itoa(pid)), 0644)
+  end
+
+  def ReadPID(name) # (string) -> (int, error)
+    b, err = os.ReadFile(MountPIDPath(name))
+    if err
+      return 0, err
+    end
+
+    pid, err = strconv.Atoi(strings.TrimSpace(string(b)))
+    if err
+      return 0, err
+    end
+
+    return pid, nil
+  end
+
+  def ProcessAlive(pid) # (int) -> bool
+    if pid <= 0
+      return false
+    end
+
+    err = syscall.Kill(pid, 0)
+    return err == nil
+  end
+
+  def SocketAlive(path) # (string) -> bool
+    conn, err = net.DialTimeout("unix", path, 500 * time.Millisecond)
+    if err
+      return false
+    end
+
+    conn.Close()
+    return true
+  end
+
+  def GetStatus(name) # (string) -> Status
+    cfg, err = LoadConfig(name)
+    if err
+      return Status.new(Name: name, Running: false, Error: err.Error())
+    end
+
+    pid, _ = ReadPID(name)
+    running = ProcessAlive(pid)
+    sock = MountSocketPath(name)
+    sockAlive = SocketAlive(sock)
+
+    if !running
+      if pid > 0
+        _ = os.Remove(MountPIDPath(name))
+      end
+      pid = 0
+    end
+
+    return Status.new(
+      Name: name,
+      Running: running,
+      PID: pid,
+      Socket: sock,
+      SocketAlive: sockAlive,
+      Mountpoint: cfg.Mountpoint,
+      Remote: cfg.Remote
+    )
+  end
+
+  def Up(name, exe) # (string, string) -> error
+    cfg, err = LoadConfig(name)
+    if err
+      return err
+    end
+
+    st = GetStatus(name)
+    if st.Running
+      return fmt.Errorf("mount %s is already running (pid %d)", name, st.PID)
+    end
+
+    if (err = EnsureDirs(name))
+      return err
+    end
+
+    logPath = MountLogPath(name)
+    logFile, err = os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+    if err
+      return err
+    end
+
+    args = Array[string].new(
+      "mount",
+      "run",
+      cfg.Root,
+      cfg.Mountpoint,
+      "--db", MountDBPath(name),
+      "--socket", MountSocketPath(name),
+      "--remote", cfg.Remote,
+      "--remote-user", cfg.RemoteUser,
+      "--remote-pass", cfg.RemotePass
+    )
+
+    if cfg.RemoteInsecure
+      args = append(args, "--remote-insecure")
+    end
+
+    if cfg.Owner != ""
+      args = append(args, "--owner")
+      args = append(args, cfg.Owner)
+    end
+
+    c = exec.Command(exe, *args)
+    c.Stdout = logFile
+    c.Stderr = logFile
+    c.Stdin = nil
+    c.SysProcAttr = @syscall.SysProcAttr.new(Setsid: true)
+
+    if (err = c.Start())
+      logFile.Close()
+      return err
+    end
+
+    pid = c.Process.Pid
+    _ = c.Process.Release()
+    logFile.Close()
+
+    if (err = WritePID(name, pid))
+      return err
+    end
+
+    # Wait briefly for socket or process to settle.
+    i = 0
+    loop do
+      if i >= 20
+        break
+      end
+
+      if SocketAlive(MountSocketPath(name)) || !ProcessAlive(pid)
+        break
+      end
+
+      time.Sleep(100 * time.Millisecond)
+      i = i + 1
+    end
+
+    if !ProcessAlive(pid)
+      return fmt.Errorf("mount %s exited immediately, see %s", name, logPath)
+    end
+
+    return nil
+  end
+
+  def Down(name) # (string) -> error
+    pid, err = ReadPID(name)
+    if err
+      return nil
+    end
+
+    if !ProcessAlive(pid)
+      _ = os.Remove(MountPIDPath(name))
+      return nil
+    end
+
+    err = syscall.Kill(pid, syscall.SIGTERM)
+    if err
+      return err
+    end
+
+    i = 0
+    loop do
+      if i >= 50
+        break
+      end
+
+      if !ProcessAlive(pid)
+        break
+      end
+
+      time.Sleep(100 * time.Millisecond)
+      i = i + 1
+    end
+
+    if ProcessAlive(pid)
+      _ = syscall.Kill(pid, syscall.SIGKILL)
+    end
+
+    _ = os.Remove(MountPIDPath(name))
+    return nil
+  end
+end

@@ -1,0 +1,83 @@
+require "fmt"
+
+require "github.com/spf13/cobra"
+
+module Cmd
+  def Uploads # () -> *cobra.Command
+    cmd = @cobra.Command.new(
+      Use: "uploads",
+      Short: "Manage uploads for a mount",
+    )
+
+    cmd.PersistentFlags().String("mount", "", "mount name or id")
+    cmd.AddCommand(uploadsLs())
+    cmd.AddCommand(uploadsPause())
+    cmd.AddCommand(uploadsResume())
+    cmd.AddCommand(uploadsCancel())
+
+    return cmd
+  end
+
+  def uploadsLs # () -> *cobra.Command
+    cmd = @cobra.Command.new(
+      Use: "ls",
+      Aliases: Array[string].new("list"),
+      Short: "List uploads",
+      RunE: lambda { |c, args| # (*cobra.Command, []string) -> error
+        mount, _ = c.Flags().GetString("mount")
+        if mount == ""
+          mount, _ = c.Parent().PersistentFlags().GetString("mount")
+        end
+        fmt.Printf("TODO uploads ls mount=%s\n", mount)
+        return nil
+      }
+    )
+
+    return cmd
+  end
+
+  def uploadsPause # () -> *cobra.Command
+    cmd = @cobra.Command.new(
+      Use: "pause <id>",
+      Short: "Pause an upload",
+      Args: cobra.ExactArgs(1),
+      RunE: lambda { |c, args| # (*cobra.Command, []string) -> error
+        mount, _ = c.Parent().PersistentFlags().GetString("mount")
+        fmt.Printf("TODO uploads pause mount=%s id=%s\n", mount, args[0])
+        return nil
+      }
+    )
+
+    return cmd
+  end
+
+  def uploadsResume # () -> *cobra.Command
+    cmd = @cobra.Command.new(
+      Use: "resume <id>",
+      Short: "Resume an upload",
+      Args: cobra.ExactArgs(1),
+      RunE: lambda { |c, args| # (*cobra.Command, []string) -> error
+        mount, _ = c.Parent().PersistentFlags().GetString("mount")
+        fmt.Printf("TODO uploads resume mount=%s id=%s\n", mount, args[0])
+        return nil
+      }
+    )
+
+    return cmd
+  end
+
+  def uploadsCancel # () -> *cobra.Command
+    cmd = @cobra.Command.new(
+      Use: "cancel <id>",
+      Short: "Cancel an upload",
+      Args: cobra.ExactArgs(1),
+      RunE: lambda { |c, args| # (*cobra.Command, []string) -> error
+        mount, _ = c.Parent().PersistentFlags().GetString("mount")
+        fmt.Printf("TODO uploads cancel mount=%s id=%s\n", mount, args[0])
+        return nil
+      }
+    )
+
+    return cmd
+  end
+end

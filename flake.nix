@@ -91,7 +91,7 @@
             export BUNDLE_FORCE_RUBY_PLATFORM=false
             export BUNDLE_GEMFILE="$PWD/Gemfile"
             export BUNDLE_FROZEN=false
-            export PATH="$PWD/bin:$PWD/hack:$PATH"
+            export PATH="$PWD/build:$PWD/bin:$PWD/hack:$PATH"
           '';
         };
       });

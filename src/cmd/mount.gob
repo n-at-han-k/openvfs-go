@@ -1,0 +1,242 @@
+require "fmt"
+require "os"
+require "path/filepath"
+require "text/tabwriter"
+
+require "example.com/project/src/mounts"
+require "github.com/spf13/cobra"
+
+module Cmd
+  def Mount # () -> *cobra.Command
+    cmd = @cobra.Command.new(
+      Use: "mount",
+      Short: "Manage OpenVFS mounts",
+    )
+
+    cmd.AddCommand(mountAdd())
+    cmd.AddCommand(mountLs())
+    cmd.AddCommand(mountRm())
+    cmd.AddCommand(mountUp())
+    cmd.AddCommand(mountDown())
+    cmd.AddCommand(mountStatus())
+    cmd.AddCommand(MountRun())
+
+    return cmd
+  end
+
+  def MountRun # () -> *cobra.Command
+    cmd = @cobra.Command.new(
+      Use: "run <root> <mountpoint>",
+      Short: "Run a mount (internal)",
+      Args: cobra.ExactArgs(2),
+      Hidden: true,
+    )
+
+    cmd.Flags().String("db", "", "journal database path (required, outside the synced root)")
+    cmd.Flags().String("owner", "", "registered OpenVFS owner to verify")
+    cmd.Flags().StringP("socket", "s", "", "desktop/client control socket path")
+    cmd.Flags().String("remote", "", "remote WebDAV base URL")
+    cmd.Flags().String("remote-user", "admin", "remote WebDAV username")
+    cmd.Flags().String("remote-pass", "admin", "remote WebDAV password")
+    cmd.Flags().Bool("remote-insecure", false, "skip TLS verification for remote WebDAV")
+
+    return cmd
+  end
+
+  def mountAdd # () -> *cobra.Command
+    cmd = @cobra.Command.new(
+      Use: "add <name> <root> <mountpoint>",
+      Short: "Register a mount configuration",
+      Long: "Register a mount configuration in the local XDG mount registry.\n\nArguments:\n  name        Unique mount name\n  root        Local sync/root directory\n  mountpoint  FUSE mountpoint path",
+      Example: "  openvfs mount add work ~/OpenCloud ~/mnt/work --remote https://cloud.example.com/remote.php/dav/files/admin/\n  openvfs mount add work ~/OpenCloud ~/mnt/work --remote https://cloud.example.com/dav/ --remote-user admin --remote-pass secret --remote-insecure",
+      Args: cobra.ExactArgs(3),
+      RunE: lambda { |c, args| # (*cobra.Command, []string) -> error
+        remote, _ = c.Flags().GetString("remote")
+        remoteUser, _ = c.Flags().GetString("remote-user")
+        remotePass, _ = c.Flags().GetString("remote-pass")
+        remoteInsecure, _ = c.Flags().GetBool("remote-insecure")
+        owner, _ = c.Flags().GetString("owner")
+        force, _ = c.Flags().GetBool("force")
+
+        if remote == ""
+          return fmt.Errorf("--remote is required")
+        end
+
+        if !force
+          _, err = mounts.LoadConfig(args[0])
+          if err == nil
+            return fmt.Errorf("mount %s already exists (use --force to overwrite)", args[0])
+          end
+        end
+
+        root, err = filepath.Abs(args[1])
+        if err
+          return err
+        end
+
+        mountpoint, err = filepath.Abs(args[2])
+        if err
+          return err
+        end
+
+        cfg = mounts.Config.new(
+          Name: args[0],
+          Root: root,
+          Mountpoint: mountpoint,
+          Remote: remote,
+          RemoteUser: remoteUser,
+          RemotePass: remotePass,
+          RemoteInsecure: remoteInsecure,
+          Owner: owner
+        )
+
+        if (err = mounts.SaveConfig(cfg))
+          return err
+        end
+
+        fmt.Printf("mount %s added\n", cfg.Name)
+        return nil
+      }
+    )
+
+    cmd.Flags().String("remote", "", "remote WebDAV base URL")
+    cmd.Flags().String("remote-user", "admin", "remote WebDAV username")
+    cmd.Flags().String("remote-pass", "admin", "remote WebDAV password")
+    cmd.Flags().Bool("remote-insecure", false, "skip TLS verification for remote WebDAV")
+    cmd.Flags().String("owner", "", "registered OpenVFS owner to verify")
+    cmd.Flags().Bool("force", false, "overwrite existing mount config")
+
+    return cmd
+  end
+
+  def mountLs # () -> *cobra.Command
+    cmd = @cobra.Command.new(
+      Use: "ls",
+      Aliases: Array[string].new("list"),
+      Short: "List configured mounts",
+      RunE: lambda { |c, args| # (*cobra.Command, []string) -> error
+        configs, err = mounts.ListConfigs()
+        if err
+          return err
+        end
+
+        w = tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+        fmt.Fprintln(w, "NAME\tSTATUS\tPID\tMOUNTPOINT\tREMOTE")
+        configs.each do |_, cfg|
+          st = mounts.GetStatus(cfg.Name)
+          status = "stopped"
+          if st.Running
+            status = "running"
+          end
+
+          pid = "-"
+          if st.PID > 0
+            pid = fmt.Sprintf("%d", st.PID)
+          end
+
+          fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", cfg.Name, status, pid, cfg.Mountpoint, cfg.Remote)
+        end
+        w.Flush()
+
+        return nil
+      }
+    )
+
+    return cmd
+  end
+
+  def mountRm # () -> *cobra.Command
+    cmd = @cobra.Command.new(
+      Use: "rm <name>",
+      Aliases: Array[string].new("remove"),
+      Short: "Remove a mount configuration",
+      Args: cobra.ExactArgs(1),
+      RunE: lambda { |c, args| # (*cobra.Command, []string) -> error
+        force, _ = c.Flags().GetBool("force")
+        st = mounts.GetStatus(args[0])
+        if st.Running && !force
+          return fmt.Errorf("mount %s is running (use --force to remove config anyway)", args[0])
+        end
+
+        if (err = mounts.RemoveConfig(args[0]))
+          return err
+        end
+
+        fmt.Printf("mount %s removed\n", args[0])
+        return nil
+      }
+    )
+
+    cmd.Flags().Bool("force", false, "remove config even if mount is running")
+
+    return cmd
+  end
+
+  def mountUp # () -> *cobra.Command
+    cmd = @cobra.Command.new(
+      Use: "up <name>",
+      Aliases: Array[string].new("start"),
+      Short: "Start a mount process",
+      Args: cobra.ExactArgs(1),
+      RunE: lambda { |c, args| # (*cobra.Command, []string) -> error
+        exe, err = os.Executable()
+        if err
+          return err
+        end
+
+        if (err = mounts.Up(args[0], exe))
+          return err
+        end
+
+        fmt.Printf("mount %s started\n", args[0])
+        return nil
+      }
+    )
+
+    return cmd
+  end
+
+  def mountDown # () -> *cobra.Command
+    cmd = @cobra.Command.new(
+      Use: "down <name>",
+      Aliases: Array[string].new("stop"),
+      Short: "Stop a mount process",
+      Args: cobra.ExactArgs(1),
+      RunE: lambda { |c, args| # (*cobra.Command, []string) -> error
+        if (err = mounts.Down(args[0]))
+          return err
+        end
+
+        fmt.Printf("mount %s stopped\n", args[0])
+        return nil
+      }
+    )
+
+    return cmd
+  end
+
+  def mountStatus # () -> *cobra.Command
+    cmd = @cobra.Command.new(
+      Use: "status <name>",
+      Short: "Show mount status",
+      Args: cobra.ExactArgs(1),
+      RunE: lambda { |c, args| # (*cobra.Command, []string) -> error
+        st = mounts.GetStatus(args[0])
+        fmt.Printf("name: %s\n", st.Name)
+        fmt.Printf("running: %t\n", st.Running)
+        fmt.Printf("pid: %d\n", st.PID)
+        fmt.Printf("socket: %s\n", st.Socket)
+        fmt.Printf("socket_alive: %t\n", st.SocketAlive)
+        fmt.Printf("mountpoint: %s\n", st.Mountpoint)
+        fmt.Printf("remote: %s\n", st.Remote)
+        if st.Error != ""
+          fmt.Printf("error: %s\n", st.Error)
+        end
+
+        return nil
+      }
+    )
+
+    return cmd
+  end
+end

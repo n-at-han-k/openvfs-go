@@ -3,9 +3,11 @@ require "errors"
 require "os"
 require "os/signal"
 require "path/filepath"
+require "strings"
 require "syscall"
 require "time"
 
+require "example.com/project/src/cmd"
 require "github.com/rs/zerolog"
 require "github.com/rs/zerolog/log"
 require "github.com/spf13/cobra"
@@ -14,78 +16,85 @@ module Main
   def main # ()
     log.Logger = log.Output(zerolog.ConsoleWriter.new(Out: os.Stderr, TimeFormat: time.RFC3339))
 
-    rootCmd = @cobra.Command.new(
-      Use: "openvfs <root> <mountpoint>",
-      Short: "Mount a sync folder as a FUSE filesystem",
-      Args: cobra.ExactArgs(2),
-      RunE: lambda { |cmd, args| # (*cobra.Command, []string) -> error
-        verbose, _ = cmd.Flags().GetBool("verbose")
-
-        zerolog.SetGlobalLevel(zerolog.InfoLevel)
-        if verbose
-          zerolog.SetGlobalLevel(zerolog.DebugLevel)
-        end
-
-        root, err = filepath.Abs(args[0])
-        if err
-          return err
-        end
-
-        mountpoint, err = filepath.Abs(args[1])
-        if err
-          return err
-        end
-
-        dbPath, _ = cmd.Flags().GetString("db")
-        if dbPath == ""
-          return errors.New("--db is required: the journal cannot live under the synced root")
-        end
-
-        dbPath, err = filepath.Abs(dbPath)
-        if err
-          return err
-        end
-
-        owner, _ = cmd.Flags().GetString("owner")
-        socketPath, _ = cmd.Flags().GetString("socket")
-        remoteURL, _ = cmd.Flags().GetString("remote")
-        remoteUser, _ = cmd.Flags().GetString("remote-user")
-        remotePass, _ = cmd.Flags().GetString("remote-pass")
-        remoteInsecure, _ = cmd.Flags().GetBool("remote-insecure")
-
-        service = @Service.new(
-          Root:       root,
-          Mountpoint: mountpoint,
-          DBPath:     dbPath,
-          Owner:      owner,
-          SocketPath: socketPath,
-
-          RemoteURL:      remoteURL,
-          RemoteUser:     remoteUser,
-          RemotePass:     remotePass,
-          RemoteInsecure: remoteInsecure,
-
-          PollInterval:     30 * time.Second,
-          HydrationTimeout: 300 * time.Second
-        )
-
-        ctx, cancel = signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-        defer cancel()
-
-        return service.Run(ctx)
-      }
+    appCmd = @cobra.Command.new(
+      Use: "openvfs",
+      Short: "OpenVFS - virtual filesystem for cloud storage",
+      SilenceUsage: true
     )
 
-    rootCmd.Flags().String("db", "", "journal database path (required, outside the synced root)")
-    rootCmd.Flags().BoolP("verbose", "v", false, "log every change")
-    rootCmd.Flags().String("owner", "", "registered OpenVFS owner to verify")
-    rootCmd.Flags().StringP("socket", "s", "", "desktop client socket API path")
-    rootCmd.Flags().String("remote", "", "remote WebDAV base URL")
-    rootCmd.Flags().String("remote-user", "admin", "remote WebDAV username")
-    rootCmd.Flags().String("remote-pass", "admin", "remote WebDAV password")
-    rootCmd.Flags().Bool("remote-insecure", false, "skip TLS verification for remote WebDAV")
+    appCmd.PersistentFlags().BoolP("verbose", "v", false, "verbose logging")
 
-    if (err = rootCmd.Execute())
+    mountCommand = cmd.Mount()
+    mountCommand.Commands().each do |_, c|
+      if strings.HasPrefix(c.Use, "run ")
+        c.RunE = lambda { |cmd2, args| # (*cobra.Command, []string) -> error
+          verbose, _ = cmd2.Flags().GetBool("verbose")
+          if !verbose
+            verbose, _ = cmd2.Root().PersistentFlags().GetBool("verbose")
+          end
+
+          zerolog.SetGlobalLevel(zerolog.InfoLevel)
+          if verbose
+            zerolog.SetGlobalLevel(zerolog.DebugLevel)
+          end
+
+          root, err = filepath.Abs(args[0])
+          if err
+            return err
+          end
+
+          mountpoint, err = filepath.Abs(args[1])
+          if err
+            return err
+          end
+
+          dbPath, _ = cmd2.Flags().GetString("db")
+          if dbPath == ""
+            return errors.New("--db is required: the journal cannot live under the synced root")
+          end
+
+          dbPath, err = filepath.Abs(dbPath)
+          if err
+            return err
+          end
+
+          owner, _ = cmd2.Flags().GetString("owner")
+          socketPath, _ = cmd2.Flags().GetString("socket")
+          remoteURL, _ = cmd2.Flags().GetString("remote")
+          remoteUser, _ = cmd2.Flags().GetString("remote-user")
+          remotePass, _ = cmd2.Flags().GetString("remote-pass")
+          remoteInsecure, _ = cmd2.Flags().GetBool("remote-insecure")
+
+          service = @Service.new(
+            Root:       root,
+            Mountpoint: mountpoint,
+            DBPath:     dbPath,
+            Owner:      owner,
+            SocketPath: socketPath,
+
+            RemoteURL:      remoteURL,
+            RemoteUser:     remoteUser,
+            RemotePass:     remotePass,
+            RemoteInsecure: remoteInsecure,
+
+            PollInterval:     30 * time.Second,
+            HydrationTimeout: 300 * time.Second
+          )
+
+          ctx, cancel = signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+          defer cancel()
+
+          return service.Run(ctx)
+        }
+      end
+    end
+
+    appCmd.AddCommand(mountCommand)
+    appCmd.AddCommand(cmd.Uploads())
+    appCmd.AddCommand(cmd.Downloads())
+    appCmd.AddCommand(cmd.Status())
+
+    if (err = appCmd.Execute())
       log.Fatal().Err(err).Msg("openvfs")
     end
   end
