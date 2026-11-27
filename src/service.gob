@@ -1,7 +1,8 @@
 require "context"
-require "time"
-require "path/filepath"
 require "os"
+require "path/filepath"
+require "strings"
+require "time"
 
 require "example.com/project/src/directory"
 require "example.com/project/src/journal"
@@ -45,7 +46,48 @@ module Main
 
       log.Info().Str("db", self.DBPath).Msg("journal ready")
 
-      scanner = directory.NewScanner(self.Root, nil, self.journal)
+      relIfInside = lambda { |p| # (string) -> string
+        if p == ""
+          return ""
+        end
+
+        abs, err = filepath.Abs(p)
+        if err
+          return ""
+        end
+
+        rel, err = filepath.Rel(self.Mountpoint, abs)
+        if err
+          return ""
+        end
+
+        rel = filepath.ToSlash(rel)
+        if rel == "." || rel == ".." || strings.HasPrefix(rel, "../")
+          return ""
+        end
+
+        return rel
+      }
+
+      dbRel = relIfInside(self.DBPath)
+      socketRel = relIfInside(self.SocketPath)
+      mountRel = relIfInside(self.Mountpoint)
+
+      ignored = lambda { |p| # (string) -> bool
+        Array[string].new(dbRel, dbRel + "-wal", dbRel + "-shm", socketRel, mountRel).each do |_, ig|
+          if ig == "" || ig == "-wal" || ig == "-shm"
+            next
+          end
+
+          if p == ig || strings.HasPrefix(p, ig + "/")
+            return true
+          end
+        end
+
+        return false
+      }
+
+      scanner = directory.NewScanner(self.Mountpoint, ignored, self.journal)
 
       var :remoteScanner, @@remote.Scanner
       if self.RemoteURL != ""
@@ -77,7 +119,7 @@ module Main
 
       syncer.Request(SyncRequest.new(Cause: directory.Event.new(Kind: directory.Rescan)))
 
-      go directory.RunWatcher(ctx, self.Root, nil, lambda { |event| # (directory.Event)
+      go directory.RunWatcher(ctx, self.Mountpoint, ignored, lambda { |event| # (directory.Event)
         syncer.Request(SyncRequest.new(Cause: event))
         scanner.Apply(event)
       })
@@ -87,7 +129,7 @@ module Main
         syncer.Request(SyncRequest.new(Cause: event))
       })
 
-      go vfs.RunMount(ctx, self.Root, self.Mountpoint, self.Owner, self.HydrationTimeout, lambda { |event| # (vfs.MountEvent)
+      go vfs.RunMount(ctx, self.Mountpoint, self.Mountpoint, self.Owner, self.HydrationTimeout, lambda { |event| # (vfs.MountEvent)
         socket.SendMessage(event)
       })
 

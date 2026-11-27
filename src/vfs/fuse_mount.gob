@@ -1,6 +1,8 @@
 require "context"
 require "fmt"
 require "os"
+require "path/filepath"
+require "strings"
 require "syscall"
 require "time"
 
@@ -50,6 +52,7 @@ module Vfs
   class FuseMount
     attr_accessor :Root,       string
     attr_accessor :Mountpoint, string
+    attr_accessor :MountRel,   string
     attr_accessor :Owner,      string
     attr_accessor :Version,    int
     attr_accessor :PID,        int
@@ -124,9 +127,19 @@ module Vfs
       return nil, err
     end
 
+    rel, relErr = filepath.Rel(root, mountpoint)
+    mountRel = ""
+    if relErr == nil
+      rel = filepath.ToSlash(filepath.Clean(rel))
+      if rel != "." && rel != ".." && !strings.HasPrefix(rel, "../")
+        mountRel = rel
+      end
+    end
+
     m = @FuseMount.new(
       Root:       root,
       Mountpoint: mountpoint,
+      MountRel:   mountRel,
       Owner:      owner,
       PID:        os.Getpid(),
       Timeout:    timeout,

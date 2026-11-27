@@ -21,6 +21,7 @@ module Main
       RunE: lambda { |cmd, args| # (*cobra.Command, []string) -> error
         verbose, _ = cmd.Flags().GetBool("verbose")
 
+        zerolog.SetGlobalLevel(zerolog.InfoLevel)
         if verbose
           zerolog.SetGlobalLevel(zerolog.DebugLevel)
         end
