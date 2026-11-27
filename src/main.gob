@@ -76,6 +76,15 @@ module Main
       }
     )
 
+    rootCmd.Flags().String("db", "", "journal database path (required, outside the synced root)")
+    rootCmd.Flags().BoolP("verbose", "v", false, "log every change")
+    rootCmd.Flags().String("owner", "", "registered OpenVFS owner to verify")
+    rootCmd.Flags().StringP("socket", "s", "", "desktop client socket API path")
+    rootCmd.Flags().String("remote", "", "remote WebDAV base URL")
+    rootCmd.Flags().String("remote-user", "admin", "remote WebDAV username")
+    rootCmd.Flags().String("remote-pass", "admin", "remote WebDAV password")
+    rootCmd.Flags().Bool("remote-insecure", false, "skip TLS verification for remote WebDAV")
+
     if (err = rootCmd.Execute())
       log.Fatal().Err(err).Msg("openvfs")
     end

@@ -157,7 +157,8 @@ module Directory
     end
 
     def add(dir) # (string) -> error
-      if (_, ok = self.watched[dir])
+      _, ok = self.watched[dir]
+      if ok
         return nil
       end
 

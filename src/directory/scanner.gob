@@ -29,8 +29,13 @@ module Directory
       end
 
       if event.Kind == Remove || event.Kind == Rename
-        if (err = self.journal.Forget(event.Path))
-          log.Warn().Err(err).Str("path", event.Path).Msg("forget")
+        e, ok, _ = self.journal.Get(event.Path)
+        if ok && (e.RemoteEtag != "" || e.RemoteFileID != "" || e.LastSyncedEtag != "" || e.LastSyncedFileID != "")
+          _ = self.journal.SetDirty(event.Path)
+        else
+          if (err = self.journal.Forget(event.Path))
+            log.Warn().Err(err).Str("path", event.Path).Msg("forget")
+          end
         end
 
         return
@@ -48,7 +53,8 @@ module Directory
       inode = InodeOf(st)
 
       if event.Kind == Create
-        if (old, ok = self.journal.PathByInode(inode))
+        old, ok = self.journal.PathByInode(inode)
+        if ok
           if old != event.Path
             if (err = self.journal.Forget(old))
               log.Warn().Err(err).Str("path", old).Msg("forget")
@@ -125,7 +131,8 @@ module Directory
       end
 
       paths.each do |_, p|
-        if (_, ok = seen[p])
+        _, ok = seen[p]
+        if ok
           next
         end
 
@@ -148,7 +155,8 @@ module Directory
 
   # InodeOf is the file's inode, or 0 where the platform does not report one.
   def InodeOf(st) # (os.FileInfo) -> uint64
-    if (sys, ok = st.Sys().(@@syscall.Stat_t))
+    sys, ok = st.Sys().(@@syscall.Stat_t)
+    if ok
       return uint64(sys.Ino)
     end
 

@@ -133,90 +133,6 @@ module Main
     end
 
     def discoverLocal(ctx) # (context.Context) -> error
-      seen = make(Hash[string, bool])
-
-      err = filepath.WalkDir(self.mountpoint, lambda { |p, d, err| # (string, fs.DirEntry, error) -> error
-        if err
-          if os.IsNotExist(err)
-            return nil
-          end
-
-          return err
-        end
-
-        rel, relErr = filepath.Rel(self.mountpoint, p)
-        if relErr != nil
-          return relErr
-        end
-
-        rel = filepath.ToSlash(rel)
-        if rel == "."
-          return nil
-        end
-
-        if self.shouldIgnore(rel)
-          if d.IsDir()
-            return filepath.SkipDir
-          end
-
-          return nil
-        end
-
-        info, infoErr = d.Info()
-        if infoErr != nil
-          if os.IsNotExist(infoErr)
-            return nil
-          end
-
-          return infoErr
-        end
-
-        seen[rel] = true
-        inode = directory.InodeOf(info)
-
-        if d.IsDir()
-          _ = self.journal.RecordDir(rel, inode, info.ModTime().Unix())
-          return nil
-        end
-
-        existing, ok, getErr = self.journal.Get(rel)
-        if getErr != nil
-          return getErr
-        end
-
-        # Detect local changes for synced files.
-        if ok && !existing.IsDir
-          if self.isLocalDirty(rel, p, existing, info)
-            _ = self.journal.SetDirty(rel)
-          end
-        end
-
-        _ = self.journal.Record(rel, inode, info.ModTime().Unix(), info.Size())
-        return nil
-      })
-      if err
-        return err
-      end
-
-      # Forget local-only entries that disappeared locally and have no remote identity.
-      entries, err = self.journal.Entries()
-      if err
-        return err
-      end
-
-      entries.each do |_, e|
-        if (_, ok = seen[e.Path])
-          next
-        end
-
-        if e.RemoteEtag != "" || e.RemoteFileID != "" || e.LastSyncedEtag != "" || e.LastSyncedFileID != ""
-          # Keep; reconcile will handle remote/local deletion.
-          next
-        end
-
-        _ = self.journal.Forget(e.Path)
-      end
-
       return nil
     end
 
@@ -243,100 +159,202 @@ module Main
       end
 
       actions = Array[SyncAction].new
-      seenRemoteMove = make(Hash[string, bool])
+      handled = make(Hash[string, bool])
 
-      # Index by remote fileid for move detection.
-      byFileID = make(Hash[string, journal.Entry])
+      # Local move detection: same inode, old synced path missing locally, new path exists locally.
+      localByInode = make(Hash[uint64, journal.Entry])
       entries.each do |_, e|
-        if e.RemoteFileID != ""
-          byFileID[e.RemoteFileID] = e
+        if e.Inode != 0 && self.localExists(e.Path)
+          localByInode[e.Inode] = e
         end
       end
 
       entries.each do |_, e|
+        if e.Inode == 0 || self.localExists(e.Path)
+          next
+        end
+
+        if e.LastSyncedEtag == "" && e.LastSyncedFileID == "" && e.RemoteEtag == "" && e.RemoteFileID == ""
+          next
+        end
+
+        newE, ok = localByInode[e.Inode]
+        unless ok
+          next
+        end
+
+        if newE.Path == e.Path
+          next
+        end
+
+        if _, ok2 = handled[e.Path]; ok2
+          next
+        end
+        if _, ok2 = handled[newE.Path]; ok2
+          next
+        end
+
+        # If new path already has remote identity, it's not a simple local move.
+        if newE.RemoteEtag != "" || newE.RemoteFileID != "" || newE.LastSyncedEtag != "" || newE.LastSyncedFileID != ""
+          next
+        end
+
+        handled[e.Path] = true
+        handled[newE.Path] = true
+        actions = actions.append(SyncAction.new(Op: OpMoveRemote, Path: newE.Path, From: e.Path, Entry: e))
+      end
+
+      # Remote move detection: same fileid disappeared at old path and appeared at new path.
+      oldByFileID = make(Hash[string, journal.Entry])
+      newByFileID = make(Hash[string, journal.Entry])
+      entries.each do |_, e|
+        if e.RemoteFileID != "" && e.RemoteSeen != scanGen && (e.LastSyncedFileID != "" || e.LastSyncedEtag != "" || e.RemoteEtag != "")
+          oldByFileID[e.RemoteFileID] = e
+        end
+        if e.RemoteFileID != "" && e.RemoteSeen == scanGen
+          newByFileID[e.RemoteFileID] = e
+        end
+      end
+
+      oldByFileID.each do |fid, oldE|
+        if _, ok = handled[oldE.Path]; ok
+          next
+        end
+        newE, ok = newByFileID[fid]
+        unless ok
+          next
+        end
+
+        if oldE.Path == newE.Path
+          next
+        end
+
+        if _, ok = handled[newE.Path]; ok
+          next
+        end
+
+        handled[oldE.Path] = true
+        handled[newE.Path] = true
+
+        if oldE.IsDir || newE.IsDir
+          actions = actions.append(SyncAction.new(Op: OpMoveLocal, Path: newE.Path, From: oldE.Path, Entry: newE))
+        else
+          localDirty = oldE.Dirty
+          if localDirty
+            actions = actions.append(SyncAction.new(Op: OpConflict, Path: oldE.Path, Entry: oldE))
+            actions = actions.append(SyncAction.new(Op: OpDownloadPlaceholder, Path: newE.Path, Entry: newE))
+          else
+            actions = actions.append(SyncAction.new(Op: OpMoveLocal, Path: newE.Path, From: oldE.Path, Entry: newE))
+          end
+        end
+      end
+
+      entries.each do |_, e|
+        _, ok = handled[e.Path]
+        if ok
+          next
+        end
         if e.Path == ""
           next
         end
 
         localExists = self.localExists(e.Path)
         remoteSeen = e.RemoteSeen == scanGen
-        hasRemote = e.RemoteEtag != "" || e.RemoteFileID != "" || remoteSeen
         hadRemote = e.LastSyncedEtag != "" || e.LastSyncedFileID != "" || e.RemoteEtag != "" || e.RemoteFileID != ""
         localDirty = e.Dirty
 
-        # Remote deleted
+        # Remote deleted (was known remotely, not seen in this scan)
         if hadRemote && !remoteSeen
           if localExists && localDirty
-            actions = append(actions, SyncAction.new(Op: OpConflict, Path: e.Path, Entry: e))
+            actions = actions.append(SyncAction.new(Op: OpConflict, Path: e.Path, Entry: e))
           elsif localExists
-            actions = append(actions, SyncAction.new(Op: OpDeleteLocal, Path: e.Path, Entry: e))
+            actions = actions.append(SyncAction.new(Op: OpDeleteLocal, Path: e.Path, Entry: e))
           else
             _ = self.journal.Forget(e.Path)
           end
           next
         end
 
-        # Remote exists
+        # Remote exists in this scan
         if remoteSeen
           if e.IsDir
             if !localExists
-              actions = append(actions, SyncAction.new(Op: OpMkdirLocal, Path: e.Path, Entry: e))
+              actions = actions.append(SyncAction.new(Op: OpMkdirLocal, Path: e.Path, Entry: e))
+            else
+              _ = self.journal.SetSynced(e.Path, vfs.StateHydrated, vfs.PinInherited, e.RemoteEtag, e.RemoteFileID, e.RemoteSize, int64(0), int64(0))
             end
-            next
-          end
-
-          if !localExists
-            actions = append(actions, SyncAction.new(Op: OpDownloadPlaceholder, Path: e.Path, Entry: e))
             next
           end
 
           remoteChanged = self.remoteChanged(e)
+
+          if !localExists
+            if hadRemote && !localDirty
+              # Local deleted, remote still exists. If remote unchanged, propagate delete; if changed, restore remote.
+              if remoteChanged
+                actions = actions.append(SyncAction.new(Op: OpDownloadPlaceholder, Path: e.Path, Entry: e))
+              else
+                actions = actions.append(SyncAction.new(Op: OpDeleteRemote, Path: e.Path, Entry: e))
+              end
+            elsif hadRemote && localDirty
+              # Local deleted but dirty? treat as conflict - restore remote.
+              actions = actions.append(SyncAction.new(Op: OpDownloadPlaceholder, Path: e.Path, Entry: e))
+            else
+              actions = actions.append(SyncAction.new(Op: OpDownloadPlaceholder, Path: e.Path, Entry: e))
+            end
+            next
+          end
+
           if remoteChanged
             if localDirty
-              actions = append(actions, SyncAction.new(Op: OpConflict, Path: e.Path, Entry: e))
+              actions = actions.append(SyncAction.new(Op: OpConflict, Path: e.Path, Entry: e))
             else
               attr, ok = vfs.RemoteFileInfoFromAttributes(filepath.Join(self.mountpoint, e.Path))
               if ok && attr.IsOK() && attr.State == vfs.StateHydrated
-                actions = append(actions, SyncAction.new(Op: OpDownloadContent, Path: e.Path, Entry: e))
+                actions = actions.append(SyncAction.new(Op: OpDownloadContent, Path: e.Path, Entry: e))
               else
-                actions = append(actions, SyncAction.new(Op: OpDownloadPlaceholder, Path: e.Path, Entry: e))
+                actions = actions.append(SyncAction.new(Op: OpDownloadPlaceholder, Path: e.Path, Entry: e))
               end
             end
             next
           end
+
+          if localDirty
+            actions = actions.append(SyncAction.new(Op: OpUpload, Path: e.Path, Entry: e))
+          else
+            # Keep synced metadata fresh.
+            st, stErr = os.Stat(filepath.Join(self.mountpoint, e.Path))
+            if stErr == nil
+              _ = self.journal.SetSynced(e.Path, e.State, e.PinState, e.RemoteEtag, e.RemoteFileID, e.RemoteSize, st.ModTime().Unix(), st.Size())
+            end
+          end
+          next
         end
 
-        # Local exists, no remote currently known but maybe local new/dirty
-        if localExists && !remoteSeen
+        # Local only / not seen remotely
+        if localExists
           if e.IsDir
-            if hadRemote
-              # local dir kept but remote gone handled above; if not seen, maybe new local dir
-            else
-              actions = append(actions, SyncAction.new(Op: OpMkdirRemote, Path: e.Path, Entry: e))
+            if !hadRemote
+              actions = actions.append(SyncAction.new(Op: OpMkdirRemote, Path: e.Path, Entry: e))
             end
             next
           end
 
           if !hadRemote
-            actions = append(actions, SyncAction.new(Op: OpUpload, Path: e.Path, Entry: e))
+            # Skip dehydrated placeholders with no remote identity? shouldn't happen.
+            attr, ok = vfs.RemoteFileInfoFromAttributes(filepath.Join(self.mountpoint, e.Path))
+            if ok && attr.IsOK() && attr.State == vfs.StateDeHydrated
+              next
+            end
+
+            actions = actions.append(SyncAction.new(Op: OpUpload, Path: e.Path, Entry: e))
             next
           end
 
           if localDirty
-            # Remote gone but local dirty handled above; local dirty and remote exists handled by conflict; here remote missing.
-            actions = append(actions, SyncAction.new(Op: OpConflict, Path: e.Path, Entry: e))
-            next
+            actions = actions.append(SyncAction.new(Op: OpConflict, Path: e.Path, Entry: e))
           end
         end
-
-        # Local dirty and remote same - upload
-        if localExists && remoteSeen && localDirty && !e.IsDir
-          actions = append(actions, SyncAction.new(Op: OpUpload, Path: e.Path, Entry: e))
-          next
-        end
-
-        _ = hasRemote
-        _ = seenRemoteMove
       end
 
       actions = self.sortActions(actions)
@@ -367,6 +385,10 @@ module Main
           err = self.doUpload(ctx, a)
         when OpDeleteRemote
           err = self.doDeleteRemote(ctx, a)
+        when OpMoveLocal
+          err = self.doMoveLocal(a)
+        when OpMoveRemote
+          err = self.doMoveRemote(ctx, a)
         when OpConflict
           err = self.doConflict(a)
         when OpUpdateMetadata
@@ -504,6 +526,81 @@ module Main
       end
 
       _ = self.journal.Forget(a.Path)
+      return nil
+    end
+
+    def doMoveLocal(a) # (SyncAction) -> error
+      src = filepath.Join(self.mountpoint, a.From)
+      dst = filepath.Join(self.mountpoint, a.Path)
+      if (err = os.MkdirAll(filepath.Dir(dst), 0755))
+        return err
+      end
+
+      if _, err = os.Stat(src); err == nil
+        if (err = os.Rename(src, dst))
+          return err
+        end
+      else
+        # Source missing locally; recreate from remote.
+        if a.Entry.IsDir
+          if (err = os.MkdirAll(dst, 0755))
+            return err
+          end
+        else
+          if (err = vfs.WriteDehydratedPlaceholder(dst, a.Entry.RemoteEtag, a.Entry.RemoteFileID, a.Entry.RemoteSize))
+            return err
+          end
+        end
+      end
+
+      _ = self.journal.Forget(a.From)
+      st, err = os.Stat(dst)
+      if err == nil
+        if a.Entry.IsDir
+          _ = self.journal.RecordDir(a.Path, directory.InodeOf(st), st.ModTime().Unix())
+          _ = self.journal.SetSynced(a.Path, vfs.StateHydrated, vfs.PinInherited, a.Entry.RemoteEtag, a.Entry.RemoteFileID, a.Entry.RemoteSize, int64(0), int64(0))
+        else
+          _ = self.journal.Record(a.Path, directory.InodeOf(st), st.ModTime().Unix(), st.Size())
+          state = vfs.StateDeHydrated
+          attr, ok = vfs.RemoteFileInfoFromAttributes(dst)
+          if ok && attr.IsOK() && attr.State == vfs.StateHydrated
+            state = vfs.StateHydrated
+          end
+          _ = self.journal.SetSynced(a.Path, state, vfs.PinInherited, a.Entry.RemoteEtag, a.Entry.RemoteFileID, a.Entry.RemoteSize, st.ModTime().Unix(), st.Size())
+        end
+      end
+
+      return nil
+    end
+
+    def doMoveRemote(ctx, a) # (context.Context, SyncAction) -> error
+      if self.client == nil
+        return fmt.Errorf("no remote client")
+      end
+
+      if (err = self.client.Move(ctx, a.From, a.Path, true))
+        return err
+      end
+
+      entry, err = self.client.Stat(ctx, a.Path)
+      if err == nil
+        st, _ = os.Stat(filepath.Join(self.mountpoint, a.Path))
+        mtime = int64(0)
+        size = int64(0)
+        if st != nil
+          mtime = st.ModTime().Unix()
+          size = st.Size()
+        end
+
+        _ = self.journal.Forget(a.From)
+        _ = self.journal.RecordRemote(a.Path, entry.ETag, entry.FileID, entry.Size, entry.IsDir, a.Entry.RemoteSeen)
+        if entry.IsDir
+          _ = self.journal.SetSynced(a.Path, vfs.StateHydrated, vfs.PinInherited, entry.ETag, entry.FileID, entry.Size, mtime, size)
+        else
+          _ = self.journal.SetSynced(a.Path, a.Entry.State, a.Entry.PinState, entry.ETag, entry.FileID, entry.Size, mtime, size)
+        end
+      end
+
       return nil
     end
 

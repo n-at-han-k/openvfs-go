@@ -87,6 +87,11 @@ module Main
       mountRel = relIfInside(self.Mountpoint)
 
       ignored = lambda { |p| # (string) -> bool
+        base = filepath.Base(p)
+        if strings.HasPrefix(base, ".openvfs-download-") || strings.HasPrefix(base, ".openvfs-upload-")
+          return true
+        end
+
         Array[string].new(dbRel, dbRel + "-wal", dbRel + "-shm", socketRel, mountRel).each do |_, ig|
           if ig == "" || ig == "-wal" || ig == "-shm"
             next
