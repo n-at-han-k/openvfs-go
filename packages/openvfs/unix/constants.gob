@@ -17,8 +17,8 @@ module Unix
   const :XAttrRealSize, "user.realsize"
   const :XAttrRegistration, "user.registration"
 
-  class RegistrationAttributes < uint8
-    def String # () -> string
+  var RegistrationAttributes = Class.new(uint8) do
+    protected def String # () -> string
       case self
       when RegistrationOwner
         return "owner"
@@ -33,8 +33,8 @@ module Unix
   const :RegistrationOwner, 0
   const :RegistrationVersion, 1
 
-  class Attributes < uint8
-    def String # () -> string
+  var Attributes = Class.new(uint8) do
+    protected def String # () -> string
       case self
       when AttrEtag
         return "etag"
@@ -58,8 +58,8 @@ module Unix
   const :AttrState, 3
   const :AttrPinState, 4
 
-  class State < uint8
-    def String # () -> string
+  var State = Class.new(uint8) do
+    protected def String # () -> string
       case self
       when StateHydrated
         return "hydrated"
@@ -77,10 +77,10 @@ module Unix
   const :StateDehydrated, 1
   const :StateHydrating, 2
 
-  class PinState < uint8
+  var PinState = Class.new(uint8) do
     # String mirrors Constants::name(PinStates) verbatim, including upstream's
     # OnlineOnly/AlwaysLocal returning "hydrated"/"dehydrated".
-    def String # () -> string
+    protected def String # () -> string
       case self
       when PinOnlineOnly
         return "hydrated"

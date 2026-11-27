@@ -8,8 +8,8 @@ require "strings"
 require "github.com/fsnotify/fsnotify"
 
 module Directory
-  class EventKind < uint8
-    def String # () -> string
+  var EventKind = Class.new(uint8) do
+    protected def String # () -> string
       case self
       when Create
         return "Create"
@@ -68,20 +68,20 @@ module Directory
     attr_accessor :ignoredFn, Proc
     # func(Event)
     attr_accessor :onChange, Proc
-    attr_accessor :watched, Hash[string, bool]
+    attr_accessor :watched, Hash[string, Struct[]]
 
-    def self.run(ctx) # (context.Context)
+    def run(ctx) # (context.Context)
       loop do
         case
-        when ~ctx.Done()
+        when ctx.Done().<<
           return
-        when ev, ok = ~self.w.Events
+        when ev, ok = self.w.Events.<<
           unless ok
             return
           end
 
           self.onEvent(ev)
-        when err, ok = ~self.w.Errors
+        when err, ok = self.w.Errors.<<
           unless ok
             return
           end
@@ -92,7 +92,7 @@ module Directory
       end
     end
 
-    def self.onEvent(ev) # (fsnotify.Event)
+    def onEvent(ev) # (fsnotify.Event)
       rel, err = filepath.Rel(self.root, ev.Name)
       if err
         return
@@ -126,7 +126,7 @@ module Directory
       end
     end
 
-    def self.addTree(dir) # (string) -> error
+    def addTree(dir) # (string) -> error
       return filepath.WalkDir(dir, lambda { |p, d, err| # (string, fs.DirEntry, error) -> error
         if err
           return err
@@ -149,7 +149,7 @@ module Directory
       })
     end
 
-    def self.add(dir) # (string) -> error
+    def add(dir) # (string) -> error
       if (_, ok = self.watched[dir])
         return nil
       end
@@ -158,12 +158,12 @@ module Directory
         return err
       end
 
-      self.watched[dir] = true
+      self.watched[dir] = Struct[].new()
 
       return nil
     end
 
-    def self.removeTree(root) # (string)
+    def removeTree(root) # (string)
       self.watched.each do |dir|
         if dir == root || strings.HasPrefix(dir, root + string(os.PathSeparator))
           _ = self.w.Remove(dir)
@@ -172,7 +172,7 @@ module Directory
       end
     end
 
-    def self.ignored(p) # (string) -> bool
+    def ignored(p) # (string) -> bool
       if strings.HasPrefix(filepath.Base(p), ".sync_")
         return true
       end
@@ -185,7 +185,7 @@ module Directory
     end
   end
 
-  def RunWatcher(ctx, root, ignored, onChange) # context.Context, string, func(string) bool, func(Event) -> ()
+  def RunWatcher(ctx, root, ignored, onChange) # context.Context, string, func(string) bool, func(Event)
     w, err = fsnotify.NewWatcher()
     if err
       log.Printf("fsnotify: %v", err)
@@ -199,7 +199,7 @@ module Directory
       w: w,
       ignoredFn: ignored,
       onChange: onChange,
-      watched: make(Hash[string, bool])
+      watched: make(Hash[string, Struct[]])
     )
 
     if (err = r.addTree(root))

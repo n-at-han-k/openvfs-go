@@ -1,7 +1,6 @@
 require "database/sql"
 require "database/sql/driver"
 require "fmt"
-require "path/filepath"
 require "strings"
 require "time"
 
@@ -175,11 +174,11 @@ VALUES (?1 , ?2, ?3 , ?4 , ?5 , ?6 , ?7,  ?8 , ?9 , ?10, ?11, ?12, ?13);`
   end
 
   def PHash(path) # (string) -> uint64
-    return cJHash64(Array[byte].new(path), 0)
+    return cJHash64(Array[byte].(path), 0)
   end
 
-  class ItemType < uint8
-    def String # () -> string
+  var ItemType = Class.new(uint8) do
+    protected def String # () -> string
       case self
       when ItemTypeFile
         return "File"
@@ -228,7 +227,7 @@ VALUES (?1 , ?2, ?3 , ?4 , ?5 , ?6 , ?7,  ?8 , ?9 , ?10, ?11, ?12, ?13);`
 
     attr_accessor :Err, string
 
-    def Validate # () -> error
+    protected def Validate # () -> error
       if self.RemotePerm.IsNull()
         return fmt.Errorf("record %q: remotePerm is null", self.Path)
       elsif self.Inode == 0
@@ -244,35 +243,35 @@ VALUES (?1 , ?2, ?3 , ?4 , ?5 , ?6 , ?7,  ?8 , ?9 , ?10, ?11, ?12, ?13);`
       return nil
     end
 
-    def IsValid # () -> bool
+    protected def IsValid # () -> bool
       return !self.HasError() && self.Path != ""
     end
 
-    def HasError # () -> bool
+    protected def HasError # () -> bool
       return self.Err != ""
     end
 
-    def ModDateTime # () -> time.Time
+    protected def ModDateTime # () -> time.Time
       return time.Unix(self.ModTime, 0).UTC()
     end
 
-    def IsDirectory # () -> bool
+    protected def IsDirectory # () -> bool
       return self.Type == ItemTypeDirectory
     end
 
-    def IsFile # () -> bool
+    protected def IsFile # () -> bool
       return self.Type == ItemTypeFile || self.Type == ItemTypeVirtualFileDehydration
     end
 
-    def IsVirtualFile # () -> bool
+    protected def IsVirtualFile # () -> bool
       return self.Type == ItemTypeVirtualFile || self.Type == ItemTypeVirtualFileDownload
     end
 
-    def Name # () -> string
+    protected def Name # () -> string
       return self.Path[strings.LastIndex(self.Path, "/") + 1...]
     end
 
-    def String # () -> string
+    protected def String # () -> string
       if self.HasError()
         return fmt.Sprintf("SyncJournalFileRecord(Error: %s)", self.Err)
       end
@@ -284,7 +283,7 @@ VALUES (?1 , ?2, ?3 , ?4 , ?5 , ?6 , ?7,  ?8 , ?9 , ?10, ?11, ?12, ?13);`
         self.FileSize, self.ChecksumHeader, self.ServerHasIgnoredFiles, self.HasDirtyPlaceholder)
     end
 
-    def Equal(o) # (SyncJournalFileRecord) -> bool
+    protected def Equal(o) # (SyncJournalFileRecord) -> bool
       return self.Path == o.Path && self.Inode == o.Inode && self.ModTime == o.ModTime &&
         self.Type == o.Type && self.Etag == o.Etag && self.FileID == o.FileID &&
         self.FileSize == o.FileSize && self.RemotePerm == o.RemotePerm &&
@@ -339,8 +338,7 @@ VALUES (?1 , ?2, ?3 , ?4 , ?5 , ?6 , ?7,  ?8 , ?9 , ?10, ?11, ?12, ?13);`
     ), nil
   end
 
-  class Permission < int
-  end
+  var Permission = Class.new(int)
 
   const :CanWrite, 1
   const :CanDelete, 2
@@ -363,7 +361,7 @@ VALUES (?1 , ?2, ?3 , ?4 , ?5 , ?6 , ?7,  ?8 , ?9 , ?10, ?11, ?12, ?13);`
   class RemotePermissions
     attr_accessor :value, uint16
 
-    def self.fromArray(s) # (string)
+    def fromArray(s) # (string)
       self.value = REMOTE_PERM_NOT_NULL_MASK
 
       s.each do |_, r|
@@ -375,7 +373,7 @@ VALUES (?1 , ?2, ?3 , ?4 , ?5 , ?6 , ?7,  ?8 , ?9 , ?10, ?11, ?12, ?13);`
       end
     end
 
-    def ToDbValue # () -> string
+    protected def ToDbValue # () -> string
       if self.IsNull()
         return ""
       end
@@ -398,23 +396,23 @@ VALUES (?1 , ?2, ?3 , ?4 , ?5 , ?6 , ?7,  ?8 , ?9 , ?10, ?11, ?12, ?13);`
       return b.String()
     end
 
-    def String # () -> string
+    protected def String # () -> string
       return self.ToDbValue()
     end
 
-    def HasPermission(perm) # (Permission) -> bool
+    protected def HasPermission(perm) # (Permission) -> bool
       return self.value & (1 << uint(perm)) != 0
     end
 
-    def self.SetPermission(perm) # (Permission)
+    def SetPermission(perm) # (Permission)
       self.value = self.value | (1 << uint(perm)) | REMOTE_PERM_NOT_NULL_MASK
     end
 
-    def self.UnsetPermission(perm) # (Permission)
+    def UnsetPermission(perm) # (Permission)
       self.value = self.value & ~uint16(1 << uint(perm))
     end
 
-    def IsNull # () -> bool
+    protected def IsNull # () -> bool
       return self.value & REMOTE_PERM_NOT_NULL_MASK == 0
     end
   end

@@ -34,12 +34,12 @@ module Darwin
   end
 
   # Run registers the sync root, mounts it and serves until ctx is cancelled.
-  def Run(ctx, root, owner, socketPath, onChange) # context.Context, string, string, string, func(directory.Event) -> ()
+  def Run(ctx, root, owner, socketPath, onChange) # context.Context, string, string, string, func(directory.Event)
     report(unix.Run(ctx, root, owner, socketPath, drain("openvfs")))
   end
 
   # ServeAPI serves the socket API the filesystem talks to.
-  def ServeAPI(ctx, socketPath, onChange) # context.Context, string, func(directory.Event) -> ()
+  def ServeAPI(ctx, socketPath, onChange) # context.Context, string, func(directory.Event)
     report(unix.ServeAPI(ctx, socketPath, drain("openvfs socket api")))
   end
 
@@ -69,7 +69,7 @@ module Darwin
     ready = make(Chan[error], 1)
 
     go lambda {
-      err = ~ready
+      err = ready.<<
 
       if err
         log.Printf("%s: %v", what, err)

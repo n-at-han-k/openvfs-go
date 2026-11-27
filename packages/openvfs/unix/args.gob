@@ -72,7 +72,7 @@ module Unix
     attr_accessor :DebugEnabled, bool
 
     # BlockedToOpen is VFSFuseContext::blockedToOpen().
-    def BlockedToOpen(app) # (string) -> bool
+    protected def BlockedToOpen(app) # (string) -> bool
       self.AppsNoHydrateFull.each do |_, name|
         if app == name
           return true

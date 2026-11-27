@@ -1,5 +1,7 @@
 require "database/sql"
 require "fmt"
+require "path/filepath"
+require "strings"
 
 module Journal
   var columnPatch = Struct.new(name: string, ddl: string)
@@ -10,7 +12,7 @@ module Journal
     attr_accessor :checksumTypeCache, Hash[ChecksumAlgorithm, int]
     attr_accessor :metadataTableIsEmpty, bool
 
-    def self.createTables # () -> error
+    def createTables # () -> error
       Array[string].new(
         CREATE_METADATA_TABLE,
         CREATE_DOWNLOAD_INFO_TABLE,
@@ -49,7 +51,7 @@ module Journal
       return nil
     end
 
-    def self.addColumnIfMissing(table, column, ddl) # (string, string, string) -> (bool, error)
+    def addColumnIfMissing(table, column, ddl) # (string, string, string) -> (bool, error)
       rows, err = self.db.Query("PRAGMA table_info(" + table + ")")
       if err
         return false, err
@@ -85,7 +87,7 @@ module Journal
       return true, nil
     end
 
-    def self.updateMetadataTableStructure # () -> error
+    def updateMetadataTableStructure # () -> error
       metadataColumns.each do |_, c|
         added, err = self.addColumnIfMissing("metadata", c.name, c.ddl)
         if err
@@ -108,7 +110,7 @@ module Journal
       return nil
     end
 
-    def self.updateErrorBlacklistTableStructure # () -> error
+    def updateErrorBlacklistTableStructure # () -> error
       blacklistColumns.each do |_, c|
         if (_, err = self.addColumnIfMissing("blacklist", c.name, c.ddl))
           return err
@@ -120,14 +122,14 @@ module Journal
 
     # metadata — the file record table
 
-    def self.FileRecordCount # () -> (int, error)
+    def FileRecordCount # () -> (int, error)
       var :count, int
       err = self.db.QueryRow("SELECT COUNT(*) FROM metadata").Scan(@count)
 
       return count, err
     end
 
-    def self.AvoidReadFromDbOnNextSync(path) # (string) -> error
+    def AvoidReadFromDbOnNextSync(path) # (string) -> error
       const :q, `UPDATE metadata SET md5='_invalid_' WHERE ` +
         `(?1 == path OR (?1 > (path||'/') AND ?1 < (path||'0'))) AND type == 2;`
 
@@ -140,11 +142,11 @@ module Journal
       return nil
     end
 
-    def self.ClearEtagStorageFilter # ()
+    def ClearEtagStorageFilter # ()
       self.etagStorageFilter = nil
     end
 
-    def self.SetFileRecord(record) # (SyncJournalFileRecord) -> error
+    def SetFileRecord(record) # (SyncJournalFileRecord) -> error
       etag = record.Etag
 
       if len(self.etagStorageFilter) > 0
@@ -183,7 +185,7 @@ module Journal
       return nil
     end
 
-    def self.queryRecords(query, args) # (string, ...any) -> ([]SyncJournalFileRecord, error)
+    def queryRecords(query, args) # (string, ...any) -> ([]SyncJournalFileRecord, error)
       rows, err = self.db.Query(query, *args)
       if err
         return nil, err
@@ -205,7 +207,7 @@ module Journal
       return out, rows.Err()
     end
 
-    def self.Records # () -> (map[string]SyncJournalFileRecord, error)
+    def Records # () -> (map[string]SyncJournalFileRecord, error)
       out = make(Hash[string, SyncJournalFileRecord])
 
       if self.metadataTableIsEmpty
@@ -228,7 +230,7 @@ module Journal
       return out, nil
     end
 
-    def self.FileRecord(filename) # (string) -> (SyncJournalFileRecord, error)
+    def FileRecord(filename) # (string) -> (SyncJournalFileRecord, error)
       if filepath.IsAbs(filename)
         return SyncJournalFileRecord.new(), fmt.Errorf("FileRecord: %q is absolute", filename)
       end
@@ -246,7 +248,7 @@ module Journal
       return rec, err
     end
 
-    def self.FileRecordByInode(inode) # (uint64) -> (SyncJournalFileRecord, error)
+    def FileRecordByInode(inode) # (uint64) -> (SyncJournalFileRecord, error)
       if inode == 0 || self.metadataTableIsEmpty
         return SyncJournalFileRecord.new(), nil
       end
@@ -260,7 +262,7 @@ module Journal
       return rec, err
     end
 
-    def self.FileRecordsByFileID(fileID) # (string) -> ([]SyncJournalFileRecord, error)
+    def FileRecordsByFileID(fileID) # (string) -> ([]SyncJournalFileRecord, error)
       if fileID == "" || self.metadataTableIsEmpty
         return nil, nil
       end
@@ -268,7 +270,7 @@ module Journal
       return self.queryRecords(GET_FILE_RECORDS_BY_FILE_ID, fileID)
     end
 
-    def self.ListFilesInPath(path) # (string) -> ([]SyncJournalFileRecord, error)
+    def ListFilesInPath(path) # (string) -> ([]SyncJournalFileRecord, error)
       if self.metadataTableIsEmpty
         return nil, nil
       end
@@ -276,7 +278,7 @@ module Journal
       return self.queryRecords(LIST_FILES_IN_PATH_QUERY, int64(PHash(path)))
     end
 
-    def self.DirtyPlaceholders # () -> ([]SyncJournalFileRecord, error)
+    def DirtyPlaceholders # () -> ([]SyncJournalFileRecord, error)
       if self.metadataTableIsEmpty
         return nil, nil
       end
@@ -284,7 +286,7 @@ module Journal
       return self.queryRecords(GET_DIRTY_PLACEHOLDERS)
     end
 
-    def self.DeleteRecord(path) # (string) -> error
+    def DeleteRecord(path) # (string) -> error
       _, err = self.db.Exec(DELETE_FILE_RECORD_QUERY, int64(PHash(path)))
 
       return err
@@ -292,7 +294,7 @@ module Journal
 
     # checksumtype — the checksum type table
 
-    def self.mapChecksumType(checksumType) # (ChecksumAlgorithm) -> int
+    def mapChecksumType(checksumType) # (ChecksumAlgorithm) -> int
       if checksumType == ChecksumParseError || checksumType == ChecksumNone
         return 0
       end
@@ -320,7 +322,7 @@ module Journal
 
     # downloadinfo
 
-    def self.DownloadInfo(path) # (string) -> (DownloadInfo, error)
+    def DownloadInfo(path) # (string) -> (DownloadInfo, error)
       var :out, DownloadInfo
       var :tmp, sql.NullString
       var :etag, sql.NullString
@@ -346,7 +348,7 @@ module Journal
       return out, nil
     end
 
-    def self.SetDownloadInfo(path, info) # (string, DownloadInfo) -> error
+    def SetDownloadInfo(path, info) # (string, DownloadInfo) -> error
       unless info.Valid
         return self.DeleteDownloadInfo(path)
       end
@@ -356,13 +358,13 @@ module Journal
       return err
     end
 
-    def self.DeleteDownloadInfo(path) # (string) -> error
+    def DeleteDownloadInfo(path) # (string) -> error
       _, err = self.db.Exec(DELETE_DOWNLOAD_INFO_QUERY, path)
 
       return err
     end
 
-    def self.AllDownloadInfos # () -> ([]DownloadInfoWithPath, error)
+    def AllDownloadInfos # () -> ([]DownloadInfoWithPath, error)
       rows, err = self.db.Query(GET_ALL_DOWNLOAD_INFO_QUERY)
       if err
         return nil, err
@@ -398,7 +400,7 @@ module Journal
 
     # uploadinfo
 
-    def self.UploadInfo(path) # (string) -> (UploadInfo, error)
+    def UploadInfo(path) # (string) -> (UploadInfo, error)
       var :out, UploadInfo
       var :size, sql.NullInt64
       var :modtime, sql.NullInt64
@@ -427,7 +429,7 @@ module Journal
       return out, nil
     end
 
-    def self.SetUploadInfo(path, info) # (string, UploadInfo) -> error
+    def SetUploadInfo(path, info) # (string, UploadInfo) -> error
       unless info.Valid
         _, err = self.db.Exec(`DELETE FROM uploadinfo WHERE path=?1`, path)
 
@@ -439,7 +441,7 @@ module Journal
       return err
     end
 
-    def self.AllUploadInfos # () -> ([]UploadInfo, error)
+    def AllUploadInfos # () -> ([]UploadInfo, error)
       rows, err = self.db.Query(GET_ALL_UPLOAD_INFO_QUERY)
       if err
         return nil, err
@@ -475,7 +477,7 @@ module Journal
 
     # blacklist
 
-    def self.ErrorBlacklistEntry(path) # (string) -> (BlacklistEntry, bool, error)
+    def ErrorBlacklistEntry(path) # (string) -> (BlacklistEntry, bool, error)
       var :out, BlacklistEntry
       var :etag, sql.NullString
       var :errString, sql.NullString
@@ -501,7 +503,7 @@ module Journal
       return out, true, nil
     end
 
-    def self.SetErrorBlacklistEntry(e) # (BlacklistEntry) -> error
+    def SetErrorBlacklistEntry(e) # (BlacklistEntry) -> error
       _, err = self.db.Exec(
         SET_ERROR_BLACKLIST_QUERY,
         e.Path,
@@ -519,7 +521,7 @@ module Journal
       return err
     end
 
-    def self.DeleteErrorBlacklistEntry(path) # (string) -> error
+    def DeleteErrorBlacklistEntry(path) # (string) -> error
       _, err = self.db.Exec(DELETE_ERROR_BLACKLIST_QUERY, path)
 
       return err
@@ -527,7 +529,7 @@ module Journal
 
     # conflicts
 
-    def self.ConflictRecord(path) # (string) -> (ConflictRecord, bool, error)
+    def ConflictRecord(path) # (string) -> (ConflictRecord, bool, error)
       var :out, ConflictRecord
       var :id, sql.NullString
       var :etag, sql.NullString
@@ -555,13 +557,13 @@ module Journal
       return out, true, nil
     end
 
-    def self.SetConflictRecord(r) # (ConflictRecord) -> error
+    def SetConflictRecord(r) # (ConflictRecord) -> error
       _, err = self.db.Exec(SET_CONFLICT_RECORD_QUERY, r.Path, r.BaseFileID, r.BaseModtime, r.BaseEtag, r.BasePath)
 
       return err
     end
 
-    def self.DeleteConflictRecord(path) # (string) -> error
+    def DeleteConflictRecord(path) # (string) -> error
       _, err = self.db.Exec(DELETE_CONFLICT_QUERY, path)
 
       return err
@@ -569,13 +571,13 @@ module Journal
 
     # selectivesync
 
-    def self.SetSelectiveSync(path, typ) # (string, int) -> error
+    def SetSelectiveSync(path, typ) # (string, int) -> error
       _, err = self.db.Exec(SET_SELECTIVE_SYNC_QUERY, path, typ)
 
       return err
     end
 
-    def self.SelectiveSync(typ) # (int) -> ([]string, error)
+    def SelectiveSync(typ) # (int) -> ([]string, error)
       rows, err = self.db.Query(GET_SELECTIVE_SYNC_QUERY, typ)
       if err
         return nil, err
@@ -600,7 +602,7 @@ module Journal
 
     # version
 
-    def self.Version # () -> (Version, error)
+    def Version # () -> (Version, error)
       var :out, Version
       var :custom, sql.NullString
 
@@ -619,13 +621,13 @@ module Journal
       return out, nil
     end
 
-    def self.SetVersion(v) # (Version) -> error
+    def SetVersion(v) # (Version) -> error
       _, err = self.db.Exec(SET_VERSION_QUERY, v.Major, v.Minor, v.Patch, v.Custom)
 
       return err
     end
 
-    def self.Close # () -> error
+    def Close # () -> error
       return self.db.Close()
     end
   end

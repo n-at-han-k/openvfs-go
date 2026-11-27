@@ -1,5 +1,3 @@
-require "database/sql"
-
 module Journal
   CREATE_DOWNLOAD_INFO_TABLE = `CREATE TABLE IF NOT EXISTS downloadinfo(
 path VARCHAR(4096),

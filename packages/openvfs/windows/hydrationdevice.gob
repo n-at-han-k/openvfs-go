@@ -38,36 +38,36 @@ module Windows
     # func(err string)
     attr_accessor :OnError, Proc
 
-    attr_accessor :aborted, Chan[bool]
+    attr_accessor :aborted, Chan[Struct[]]
     attr_accessor :once, sync.Once
 
-    def self.Vfs # () -> *VfsCfApi
+    def Vfs # () -> *VfsCfApi
       return self.vfs
     end
 
-    def self.FileID # () -> []byte
+    def FileID # () -> []byte
       return self.fileID
     end
 
-    def self.Device # () -> *HydrationDevice
+    def Device # () -> *HydrationDevice
       return self.device
     end
 
-    def self.Record # () -> SyncFileItem
+    def Record # () -> SyncFileItem
       return self.record
     end
 
     # SetTargetFile is HydrationJob::setTargetFile().
-    def self.SetTargetFile(fileName) # (string)
+    def SetTargetFile(fileName) # (string)
       self.fileName = fileName
     end
 
-    def self.TargetFileName # () -> string
+    def TargetFileName # () -> string
       return self.fileName
     end
 
     # Start is HydrationJob::start().
-    def self.Start # ()
+    def Start # ()
       go lambda {
         if self.Fetch == nil
           self.emitError("no hydration transport installed")
@@ -84,7 +84,7 @@ module Windows
     end
 
     # Abort is HydrationJob::abort().
-    def self.Abort # ()
+    def Abort # ()
       self.once.Do(lambda {
         close(self.aborted)
         self.emitError("aborted")
@@ -92,17 +92,17 @@ module Windows
     end
 
     # Aborted reports whether Abort has been called, so a Fetch can stop early.
-    def self.Aborted # () -> <-chan bool
+    def Aborted # () -> <-chan bool
       return self.aborted
     end
 
-    def self.emitFinished # ()
+    def emitFinished # ()
       if self.OnFinished != nil
         self.OnFinished()
       end
     end
 
-    def self.emitError(err) # (string)
+    def emitError(err) # (string)
       if self.OnError != nil
         self.OnError(err)
       end
@@ -118,17 +118,17 @@ module Windows
     attr_accessor :HydrationJob, @@HydrationJob
     attr_accessor :context, CallBackContext
 
-    def self.SetContext(context) # (CallBackContext)
+    def SetContext(context) # (CallBackContext)
       self.context = context
     end
 
-    def self.Context # () -> CallBackContext
+    def Context # () -> CallBackContext
       return self.context
     end
   end
 
   def NewHydrationJob(v, fileID, device) # (*VfsCfApi, []byte, *HydrationDevice) -> *HydrationJob
-    return @HydrationJob.new(vfs: v, fileID: fileID, device: device, aborted: make(Chan[bool]))
+    return @HydrationJob.new(vfs: v, fileID: fileID, device: device, aborted: make(Chan[Struct[]]))
   end
 
   # HydrationDevice is the QIODevice the downloaded bytes are written into. It
@@ -145,13 +145,13 @@ module Windows
     attr_accessor :errorString, string
 
     # ReadData is HydrationDevice::readData(), which upstream marks unreachable.
-    def self.ReadData(p) # ([]byte) -> (int, error)
+    def ReadData(p) # ([]byte) -> (int, error)
       return 0, fmt.Errorf("HydrationDevice is write only")
     end
 
     # Write is HydrationDevice::writeData(). It keeps the io.Writer contract so a
     # download can be streamed straight into it.
-    def self.Write(data) # ([]byte) -> (int, error)
+    def Write(data) # ([]byte) -> (int, error)
       n, err = self.writeData(data)
       if err
         return 0, err
@@ -160,7 +160,7 @@ module Windows
       return n, nil
     end
 
-    def self.writeData(data) # ([]byte) -> (int, error)
+    def writeData(data) # ([]byte) -> (int, error)
       length = len(data)
       self.buffer = append(self.buffer, *data)
       isLastChunk = (self.offset + int64(len(self.buffer))) >= self.totalSize
@@ -236,7 +236,7 @@ module Windows
     end
 
     # Close is HydrationDevice::close().
-    def self.Close # () -> error
+    def Close # () -> error
       if len(self.buffer) != 0
         # upstream asserts the buffer is empty here
         lcCfApiHydrationDevice.Warning("closing the hydration device with %d bytes still buffered", len(self.buffer))
@@ -246,7 +246,7 @@ module Windows
     end
 
     # ErrorString is QIODevice::errorString().
-    def self.ErrorString # () -> string
+    def ErrorString # () -> string
       return self.errorString
     end
   end

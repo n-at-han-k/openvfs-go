@@ -18,47 +18,47 @@ module Directory
 
     attr_accessor :err, string
 
-    def Name # () -> string
+    protected def Name # () -> string
       return self.name
     end
 
-    def IsDirectory # () -> bool
+    protected def IsDirectory # () -> bool
       return self.isDirectory
     end
 
-    def Etag # () -> string
+    protected def Etag # () -> string
       return self.etag
     end
 
-    def FileID # () -> string
+    protected def FileID # () -> string
       return self.fileID
     end
 
-    def ChecksumHeader # () -> string
+    protected def ChecksumHeader # () -> string
       return self.checksumHeader
     end
 
-    def RemotePerm # () -> journal.RemotePermissions
+    protected def RemotePerm # () -> journal.RemotePermissions
       return self.remotePerm
     end
 
-    def ModTime # () -> int64
+    protected def ModTime # () -> int64
       return self.modtime
     end
 
-    def Size # () -> int64
+    protected def Size # () -> int64
       return self.size
     end
 
-    def Error # () -> string
+    protected def Error # () -> string
       return self.err
     end
 
-    def IsVaultFile # () -> bool
+    protected def IsVaultFile # () -> bool
       return self.vaultIntegrityID != ""
     end
 
-    def IsValid # () -> bool
+    protected def IsValid # () -> bool
       return self.name != ""
     end
   end

@@ -9,23 +9,23 @@ module Windows
   # the categories declared with a level other than the default.
 
   var loggingCategory = Struct.new(name: string) do
-    def self.emit(level, format, v) # (string, string, ...any)
+    def emit(level, format, v) # (string, string, ...any)
       log.Printf("[%s] %s %s", level, self.name, fmt.Sprintf(format, *v))
     end
 
-    def self.Debug(format, v) # (string, ...any)
+    def Debug(format, v) # (string, ...any)
       self.emit("debug", format, *v)
     end
 
-    def self.Info(format, v) # (string, ...any)
+    def Info(format, v) # (string, ...any)
       self.emit("info", format, *v)
     end
 
-    def self.Warning(format, v) # (string, ...any)
+    def Warning(format, v) # (string, ...any)
       self.emit("warning", format, *v)
     end
 
-    def self.Critical(format, v) # (string, ...any)
+    def Critical(format, v) # (string, ...any)
       self.emit("critical", format, *v)
     end
   end

@@ -33,7 +33,7 @@ module Unix
     # to be atomic.
     attr_accessor :transferID, atomic.Int32
 
-    def self.Close # ()
+    def Close # ()
       instance.CompareAndSwap(self, nil)
       closeRootHandle(self.rootHandle)
     end
@@ -44,11 +44,11 @@ module Unix
     # paths internally. Resolving the same relative path against the root
     # handle does this without the process-wide side effect, so getInternalPath
     # only produces the name the operation is logged under.
-    def self.getInternalPath(path) # (string) -> string
+    def getInternalPath(path) # (string) -> string
       return "." + path
     end
 
-    def self.getExternalPath(path) # (string) -> string
+    def getExternalPath(path) # (string) -> string
       # ./foo
       unless filepath.IsAbs(path)
         # strJoin cleans the result, where upstream's operator/ leaves the "/./"
@@ -60,15 +60,15 @@ module Unix
       return self.mountPoint + path
     end
 
-    def self.MountPoint # () -> string
+    def MountPoint # () -> string
       return self.mountPoint
     end
 
-    def self.Owner # () -> string
+    def Owner # () -> string
       return self.owner
     end
 
-    def self.blockedToOpen(app) # (string) -> bool
+    def blockedToOpen(app) # (string) -> bool
       self.appsNoHydrateFull.each do |_, name|
         if app == name
           return true
@@ -84,13 +84,13 @@ module Unix
       return false
     end
 
-    def self.DebugEnabled # () -> bool
+    def DebugEnabled # () -> bool
       return self.debugEnabled
     end
 
     # HydrationTimeout is how long open() waits for the desktop client to hydrate
     # a file.
-    def self.HydrationTimeout # () -> time.Duration
+    def HydrationTimeout # () -> time.Duration
       return self.hydrationTimeout
     end
 
@@ -100,7 +100,7 @@ module Unix
     #
     # It is shared by every platform's open callback, because the protocol is the
     # part that does not depend on the fuse binding.
-    def self.requestHydration(caller, path, attribs) # (*callerInfo, string, PlaceHolderAttributes) -> int
+    def requestHydration(caller, path, attribs) # (*callerInfo, string, PlaceHolderAttributes) -> int
       # ignore list of apps that must not cause a hydration
       opener = getcallername(caller)
 

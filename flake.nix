@@ -35,19 +35,19 @@
         gobPack = {
           x86_64-linux = {
             platform = "x86_64-linux";
-            sha256 = "1jsjzfma7sxl7k911a9h26lzxy906av1x0704kwfx998yikrym54";
+            sha256 = "1pnyhlkn0asc9v8br417hvq0v430gdx30nfp5ydz07l4hxjb53cs";
           };
           aarch64-linux = {
             platform = "aarch64-linux";
-            sha256 = "0kyxkg5hmnq7hvrh0hfpar99ffz9dy1z42h27jllaprwn41gg8ii";
+            sha256 = "03cyq0r5phn8ykn0ma35nm2vc5sjrcf8cb2l36r0vh4xcg1w3xrd";
           };
           aarch64-darwin = {
             platform = "arm64-darwin";
-            sha256 = "0jyin7f0845v0jhlg8iknasd57g40b1gpbf9d83mmn7nzhhysh6k";
+            sha256 = "1zlvpfh86zafidmipa6qmghp4zicww7m0grhz7ab92qvs302mjxi";
           };
           x86_64-darwin = {
             platform = "x86_64-darwin";
-            sha256 = "0wlrscw37f0nz29ygnbkq7fkb6qzp8grlivnfrzi1hkh65bd8xi8";
+            sha256 = "15d25nydy707z29h6way067zsw10ischplr354da38a85zaw1cfw";
           };
         }.${system};
 

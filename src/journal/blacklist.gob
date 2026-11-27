@@ -1,5 +1,3 @@
-require "database/sql"
-
 module Journal
   CREATE_BLACKLIST_TABLE = `CREATE TABLE IF NOT EXISTS blacklist (
 path VARCHAR(4096),

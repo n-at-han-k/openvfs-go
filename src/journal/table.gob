@@ -12,7 +12,7 @@ module Journal
     attr_accessor :db, @@sql.DB
     attr_accessor :name, string
 
-    def self.Insert(data) # (Record) -> (int64, error)
+    def Insert(data) # (Record) -> (int64, error)
     end
   end
 end

@@ -34,12 +34,12 @@ module Windows
     attr_accessor :extraOrder, Array[string]
 
     # RequestHexID is CallBackContext::requestHexId().
-    def RequestHexID # () -> string
+    protected def RequestHexID # () -> string
       return strconv.FormatInt(self.TransferKey, 16)
     end
 
     # String is `QDebug operator<<(QDebug, const CallBackContext &)`.
-    def String # () -> string
+    protected def String # () -> string
       var :b, strings.Builder
 
       b.WriteString("cfapiCallback(")
@@ -60,7 +60,7 @@ module Windows
       return b.String()
     end
 
-    def self.setExtra(key, value) # (string, string)
+    def setExtra(key, value) # (string, string)
       if self.ExtraArgs == nil
         self.ExtraArgs = Hash[string, string].new()
       end
@@ -93,8 +93,8 @@ module Windows
   end
 
   # SetPinRecurseMode is the enum of the same name.
-  class SetPinRecurseMode < int
-    def String # () -> string
+  var SetPinRecurseMode = Class.new(int) do
+    protected def String # () -> string
       case self
       when NoRecurse
         return "NoRecurse"
@@ -125,23 +125,23 @@ module Windows
     attr_accessor :infoClass, cf.CF_PLACEHOLDER_INFO_CLASS
 
     # IsValid is PlaceHolderInfo::isValid() / operator bool().
-    def IsValid # () -> bool
+    protected def IsValid # () -> bool
       return len(self.data) != 0
     end
 
     # Size is PlaceHolderInfo::size().
-    def Size # () -> int
+    protected def Size # () -> int
       return len(self.data)
     end
 
     # Handle is PlaceHolderInfo::handle().
-    def Handle # () -> *Handle
+    protected def Handle # () -> *Handle
       return self.handle
     end
 
     # Basic projects the buffer as CF_PLACEHOLDER_BASIC_INFO. Go casts the raw
     # pointer; Gob has no spelling for a conversion to a pointer type.
-    def Basic # () -> *cf.CF_PLACEHOLDER_BASIC_INFO
+    protected def Basic # () -> *cf.CF_PLACEHOLDER_BASIC_INFO
       unless self.IsValid()
         return nil
       end
@@ -150,7 +150,7 @@ module Windows
     end
 
     # Standard projects the buffer as CF_PLACEHOLDER_STANDARD_INFO.
-    def Standard # () -> *cf.CF_PLACEHOLDER_STANDARD_INFO
+    protected def Standard # () -> *cf.CF_PLACEHOLDER_STANDARD_INFO
       unless self.IsValid()
         return nil
       end
@@ -158,7 +158,7 @@ module Windows
       return unsafe.Pointer(@self.data[0])
     end
 
-    def rawPinState # () -> cf.CF_PIN_STATE
+    protected def rawPinState # () -> cf.CF_PIN_STATE
       if self.infoClass == cf.CF_PLACEHOLDER_INFO_STANDARD
         return self.Standard().PinState
       end
@@ -166,7 +166,7 @@ module Windows
       return self.Basic().PinState
     end
 
-    def rawFileIdentityLength # () -> uint32
+    protected def rawFileIdentityLength # () -> uint32
       if self.infoClass == cf.CF_PLACEHOLDER_INFO_STANDARD
         return self.Standard().FileIdentityLength
       end
@@ -175,7 +175,7 @@ module Windows
     end
 
     # InSyncState reads get()->InSyncState.
-    def InSyncState # () -> cf.CF_IN_SYNC_STATE
+    protected def InSyncState # () -> cf.CF_IN_SYNC_STATE
       if self.infoClass == cf.CF_PLACEHOLDER_INFO_STANDARD
         return self.Standard().InSyncState
       end
@@ -186,7 +186,7 @@ module Windows
     # FileID is PlaceHolderInfo::fileId(). FileIdentity is a one element array at
     # the end of the struct that the API overruns with the real identity, so it is
     # read back out of the buffer the call was given.
-    def FileID # () -> []byte
+    protected def FileID # () -> []byte
       length = self.rawFileIdentityLength()
 
       if length == 0
@@ -213,7 +213,7 @@ module Windows
     end
 
     # PinState is PlaceHolderInfo::pinState().
-    def PinState # () -> PinState
+    protected def PinState # () -> PinState
       case self.rawPinState()
       when cf.CF_PIN_STATE_UNSPECIFIED
         return PinUnspecified
@@ -339,7 +339,7 @@ module Windows
       return nil
     end
 
-    return append(Array[byte].new(nil), *unsafe.Slice(p, length))
+    return append(Array[byte].(nil), *unsafe.Slice(p, length))
   end
 
   # pinStateToCfPinState is the free function of the same name.

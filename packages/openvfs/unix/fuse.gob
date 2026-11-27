@@ -49,7 +49,7 @@ module Unix
       return PlaceHolderAttributes.new(), false
     end
 
-    return PlaceHolderFromData(absolutePath, Array[byte].new(data)), true
+    return PlaceHolderFromData(absolutePath, Array[byte].(data)), true
   end
 
   def statAttr(out, st) # (*gofuse.Attr, *unix.Stat_t)
@@ -65,7 +65,7 @@ module Unix
   # is a named one here.
   var node = Struct.new(Inode: fs.Inode, v: @@VFSFuseContext, rel: string) do
     # relPath is the path handed to the *at() syscalls. "." is the root itself.
-    def self.relPath # () -> string
+    def relPath # () -> string
       if self.rel == ""
         return "."
       end
@@ -76,11 +76,11 @@ module Unix
     # internal is VFSFuseContext::getInternalPath() of this node, which is the name
     # every operation is logged under. FUSE names the root "/", so the root's
     # internal path is "./".
-    def self.internal # () -> string
+    def internal # () -> string
       return self.v.getInternalPath("/" + self.rel)
     end
 
-    def self.childRel(name) # (string) -> string
+    def childRel(name) # (string) -> string
       if self.rel == ""
         return name
       end
@@ -88,16 +88,16 @@ module Unix
       return self.rel + "/" + name
     end
 
-    def self.childInternal(name) # (string) -> string
+    def childInternal(name) # (string) -> string
       return self.v.getInternalPath("/" + self.childRel(name))
     end
 
     # external is getExternalPath() of this node.
-    def self.external # () -> string
+    def external # () -> string
       return self.v.getExternalPath(self.internal())
     end
 
-    def self.lstat(rel) # (string) -> (unix.Stat_t, error)
+    def lstat(rel) # (string) -> (unix.Stat_t, error)
       var :st, unix.Stat_t
 
       err = unix.Fstatat(self.v.rootHandle, rel, @st, unix.AT_SYMLINK_NOFOLLOW)
@@ -105,13 +105,13 @@ module Unix
       return st, err
     end
 
-    def self.newChild(ctx, rel, st) # (context.Context, string, unix.Stat_t) -> *fs.Inode
+    def newChild(ctx, rel, st) # (context.Context, string, unix.Stat_t) -> *fs.Inode
       return self.NewInode(ctx, @node.new(v: self.v, rel: rel), fs.StableAttr.new(Mode: statMode(@st), Ino: st.Ino))
     end
 
     # Lookup has no upstream counterpart: the libfuse high level API derives it
     # from getattr. It is the node API's equivalent of that lstat.
-    def self.Lookup(ctx, name, out) # (context.Context, string, *gofuse.EntryOut) -> (*fs.Inode, syscall.Errno)
+    def Lookup(ctx, name, out) # (context.Context, string, *gofuse.EntryOut) -> (*fs.Inode, syscall.Errno)
       rel = self.childRel(name)
 
       st, err = self.lstat(rel)
@@ -124,7 +124,7 @@ module Unix
       return self.newChild(ctx, rel, st), 0
     end
 
-    def self.Getattr(ctx, f, out) # (context.Context, fs.FileHandle, *gofuse.AttrOut) -> syscall.Errno
+    def Getattr(ctx, f, out) # (context.Context, fs.FileHandle, *gofuse.AttrOut) -> syscall.Errno
       path = self.internal()
       rel = self.relPath()
 
@@ -147,7 +147,7 @@ module Unix
       return 0
     end
 
-    def self.Access(ctx, mask) # (context.Context, uint32) -> syscall.Errno
+    def Access(ctx, mask) # (context.Context, uint32) -> syscall.Errno
       path = self.internal()
       err = unix.Faccessat(self.v.rootHandle, self.relPath(), mask, 0)
       openvfsfuseLog(callerOf(ctx), path, "access", rc(err), "")
@@ -155,7 +155,7 @@ module Unix
       return asErrno(err)
     end
 
-    def self.Readlink(ctx) # (context.Context) -> ([]byte, syscall.Errno)
+    def Readlink(ctx) # (context.Context) -> ([]byte, syscall.Errno)
       path = self.internal()
       buf = make(Array[byte], unix.PathMax)
 
@@ -169,7 +169,7 @@ module Unix
       return buf[...res], 0
     end
 
-    def self.Readdir(ctx) # (context.Context) -> (fs.DirStream, syscall.Errno)
+    def Readdir(ctx) # (context.Context) -> (fs.DirStream, syscall.Errno)
       path = self.internal()
 
       fd, err = unix.Openat(self.v.rootHandle, self.relPath(), unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC, 0)
@@ -196,7 +196,7 @@ module Unix
     # lchownToCaller is the lchown() upstream performs after creating an entry, so
     # the new name belongs to the process that asked for it rather than to the
     # fuse server.
-    def self.lchownToCaller(ctx, rel) # (context.Context, string)
+    def lchownToCaller(ctx, rel) # (context.Context, string)
       caller = callerOf(ctx)
 
       if caller == nil
@@ -206,7 +206,7 @@ module Unix
       _ = unix.Fchownat(self.v.rootHandle, rel, int(caller.Uid), int(caller.Gid), unix.AT_SYMLINK_NOFOLLOW)
     end
 
-    def self.Mknod(ctx, name, mode, dev, out) # (context.Context, string, uint32, uint32, *gofuse.EntryOut) -> (*fs.Inode, syscall.Errno)
+    def Mknod(ctx, name, mode, dev, out) # (context.Context, string, uint32, uint32, *gofuse.EntryOut) -> (*fs.Inode, syscall.Errno)
       path = self.childInternal(name)
       rel = self.childRel(name)
       caller = callerOf(ctx)
@@ -252,7 +252,7 @@ module Unix
       return self.newChild(ctx, rel, st), 0
     end
 
-    def self.Mkdir(ctx, name, mode, out) # (context.Context, string, uint32, *gofuse.EntryOut) -> (*fs.Inode, syscall.Errno)
+    def Mkdir(ctx, name, mode, out) # (context.Context, string, uint32, *gofuse.EntryOut) -> (*fs.Inode, syscall.Errno)
       path = self.childInternal(name)
       rel = self.childRel(name)
 
@@ -275,7 +275,7 @@ module Unix
       return self.newChild(ctx, rel, st), 0
     end
 
-    def self.Unlink(ctx, name) # (context.Context, string) -> syscall.Errno
+    def Unlink(ctx, name) # (context.Context, string) -> syscall.Errno
       path = self.childInternal(name)
       err = unix.Unlinkat(self.v.rootHandle, self.childRel(name), 0)
       openvfsfuseLog(callerOf(ctx), path, "unlink", rc(err), "")
@@ -283,7 +283,7 @@ module Unix
       return asErrno(err)
     end
 
-    def self.Rmdir(ctx, name) # (context.Context, string) -> syscall.Errno
+    def Rmdir(ctx, name) # (context.Context, string) -> syscall.Errno
       path = self.childInternal(name)
       err = unix.Unlinkat(self.v.rootHandle, self.childRel(name), unix.AT_REMOVEDIR)
       openvfsfuseLog(callerOf(ctx), path, "rmdir", rc(err), "")
@@ -291,7 +291,7 @@ module Unix
       return asErrno(err)
     end
 
-    def self.Symlink(ctx, target, name, out) # (context.Context, string, string, *gofuse.EntryOut) -> (*fs.Inode, syscall.Errno)
+    def Symlink(ctx, target, name, out) # (context.Context, string, string, *gofuse.EntryOut) -> (*fs.Inode, syscall.Errno)
       to = self.childInternal(name)
       rel = self.childRel(name)
 
@@ -314,7 +314,7 @@ module Unix
       return self.newChild(ctx, rel, st), 0
     end
 
-    def self.Link(ctx, target, name, out) # (context.Context, fs.InodeEmbedder, string, *gofuse.EntryOut) -> (*fs.Inode, syscall.Errno)
+    def Link(ctx, target, name, out) # (context.Context, fs.InodeEmbedder, string, *gofuse.EntryOut) -> (*fs.Inode, syscall.Errno)
       other, ok = target.(@@node)
 
       unless ok
@@ -343,7 +343,7 @@ module Unix
       return self.newChild(ctx, rel, st), 0
     end
 
-    def self.Rename(ctx, oldName, newParent, newName, flags) # (context.Context, string, *fs.Inode, string, uint32) -> syscall.Errno
+    def Rename(ctx, oldName, newParent, newName, flags) # (context.Context, string, *fs.Inode, string, uint32) -> syscall.Errno
       other, ok = newParent.Operations().(@@node)
 
       unless ok
@@ -363,7 +363,7 @@ module Unix
 
     # Setattr covers upstream's chmod, chown, truncate and utimens callbacks, which
     # the node API funnels into one entry point.
-    def self.Setattr(ctx, f, in_, out) # (context.Context, fs.FileHandle, *gofuse.SetAttrIn, *gofuse.AttrOut) -> syscall.Errno
+    def Setattr(ctx, f, in_, out) # (context.Context, fs.FileHandle, *gofuse.SetAttrIn, *gofuse.AttrOut) -> syscall.Errno
       path = self.internal()
       rel = self.relPath()
       caller = callerOf(ctx)
@@ -469,7 +469,7 @@ module Unix
       return 0
     end
 
-    def self.Statfs(ctx, out) # (context.Context, *gofuse.StatfsOut) -> syscall.Errno
+    def Statfs(ctx, out) # (context.Context, *gofuse.StatfsOut) -> syscall.Errno
       path = self.internal()
       var :st, unix.Statfs_t
 
@@ -485,7 +485,7 @@ module Unix
       return 0
     end
 
-    def self.Open(ctx, flags) # (context.Context, uint32) -> (fs.FileHandle, uint32, syscall.Errno)
+    def Open(ctx, flags) # (context.Context, uint32) -> (fs.FileHandle, uint32, syscall.Errno)
       path = self.internal()
       rel = self.relPath()
       caller = callerOf(ctx)
@@ -528,7 +528,7 @@ module Unix
       return newVFSFile(fd), 0, 0
     end
 
-    def self.Create(ctx, name, flags, mode, out) # (context.Context, string, uint32, uint32, *gofuse.EntryOut) -> (*fs.Inode, fs.FileHandle, uint32, syscall.Errno)
+    def Create(ctx, name, flags, mode, out) # (context.Context, string, uint32, uint32, *gofuse.EntryOut) -> (*fs.Inode, fs.FileHandle, uint32, syscall.Errno)
       path = self.childInternal(name)
       rel = self.childRel(name)
       caller = callerOf(ctx)
@@ -569,7 +569,7 @@ module Unix
 
     # Release logs the close; the descriptor itself is closed by the file handle,
     # which is what upstream's close(fi->fh) does.
-    def self.Release(ctx, f) # (context.Context, fs.FileHandle) -> syscall.Errno
+    def Release(ctx, f) # (context.Context, fs.FileHandle) -> syscall.Errno
       openvfsfuseLog(callerOf(ctx), self.internal(), "close", 0, "")
 
       if (r, ok = f.(fs.FileReleaser))
@@ -579,7 +579,7 @@ module Unix
       return 0
     end
 
-    def self.Fsync(ctx, f, flags) # (context.Context, fs.FileHandle, uint32) -> syscall.Errno
+    def Fsync(ctx, f, flags) # (context.Context, fs.FileHandle, uint32) -> syscall.Errno
       openvfsfuseLog(callerOf(ctx), self.internal(), "fsync", 0, "")
 
       # TODO:: immplement
@@ -588,11 +588,11 @@ module Unix
 
     # xattr operations are optional and can safely be left unimplemented
 
-    def self.Setxattr(ctx, attr, data, flags) # (context.Context, string, []byte, uint32) -> syscall.Errno
+    def Setxattr(ctx, attr, data, flags) # (context.Context, string, []byte, uint32) -> syscall.Errno
       return asErrno(xattrSetAt(self.v.rootHandle, self.relPath(), attr, data, int(flags)))
     end
 
-    def self.Getxattr(ctx, attr, dest) # (context.Context, string, []byte) -> (uint32, syscall.Errno)
+    def Getxattr(ctx, attr, dest) # (context.Context, string, []byte) -> (uint32, syscall.Errno)
       # if size is zero, getxattr returns the required size of the buffer.
       # See https://linux.die.net/man/2/getxattr
       copyDataResult = lambda { |s| # ([]byte) -> (uint32, syscall.Errno)
@@ -615,7 +615,7 @@ module Unix
           return 0, asErrno(err)
         end
 
-        return copyDataResult(Array[byte].new(strconv.FormatInt(st.Size, 10)))
+        return copyDataResult(Array[byte].(strconv.FormatInt(st.Size, 10)))
       end
 
       ret, err = xattrGetAt(self.v.rootHandle, rel, attr, dest)
@@ -633,7 +633,7 @@ module Unix
       return uint32(ret), 0
     end
 
-    def self.Listxattr(ctx, dest) # (context.Context, []byte) -> (uint32, syscall.Errno)
+    def Listxattr(ctx, dest) # (context.Context, []byte) -> (uint32, syscall.Errno)
       ret, err = xattrListAt(self.v.rootHandle, self.relPath(), dest)
       if err
         return 0, asErrno(err)
@@ -642,7 +642,7 @@ module Unix
       return uint32(ret), 0
     end
 
-    def self.Removexattr(ctx, attr) # (context.Context, string) -> syscall.Errno
+    def Removexattr(ctx, attr) # (context.Context, string) -> syscall.Errno
       return asErrno(xattrRemoveAt(self.v.rootHandle, self.relPath(), attr))
     end
   end
@@ -685,7 +685,7 @@ module Unix
 
     if ctx != nil
       go lambda {
-        ~ctx.Done()
+        ctx.Done().<<
         _ = server.Unmount()
       }.()
     end

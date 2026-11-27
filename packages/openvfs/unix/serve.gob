@@ -34,7 +34,7 @@ module Unix
     end
 
     go lambda {
-      ~ctx.Done()
+      ctx.Done().<<
       _ = listener.Close()
     }.()
 
@@ -68,7 +68,7 @@ module Unix
       when "V2/HYDRATE_FILE"
         var :msg, apiMessage
 
-        if (err = json.Unmarshal(Array[byte].new(payload), @msg))
+        if (err = json.Unmarshal(Array[byte].(payload), @msg))
           next
         end
 

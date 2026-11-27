@@ -34,11 +34,11 @@ module Unix
     attr_accessor :Version, int
     attr_accessor :Error, string
 
-    def IsOK # () -> bool
+    protected def IsOK # () -> bool
       return self.Error == ""
     end
 
-    def ToData # () -> ([]byte, error)
+    protected def ToData # () -> ([]byte, error)
       return toMsgpack(Hash[string, any].new(
         RegistrationOwner.String() => self.Owner,
         RegistrationVersion.String() => self.Version
@@ -93,7 +93,7 @@ module Unix
       return out
     end
 
-    return RegistrationFromData(absolutePath, Array[byte].new(data))
+    return RegistrationFromData(absolutePath, Array[byte].(data))
   end
 
   def RegisterFilesystem(path, owner) # (string, string) -> Registration
@@ -145,11 +145,11 @@ module Unix
 
     attr_accessor :ok, bool
 
-    def IsOK # () -> bool
+    protected def IsOK # () -> bool
       return self.ok
     end
 
-    def ToData # () -> ([]byte, error)
+    protected def ToData # () -> ([]byte, error)
       # Upstream asserts isOk() here.
       return toMsgpack(Hash[string, any].new(
         AttrEtag.String() => self.Etag,
@@ -161,7 +161,7 @@ module Unix
     end
 
     # RealSize is PlaceHolderAttributes::realSize().
-    def RealSize # () -> uint64
+    protected def RealSize # () -> uint64
       size, ok = xattrGetString(self.AbsolutePath, XAttrRealSize)
 
       unless ok
@@ -182,7 +182,7 @@ module Unix
       return uint64(n)
     end
 
-    def Validate # () -> bool
+    protected def Validate # () -> bool
       unless self.ok
         return false
       end
@@ -271,7 +271,7 @@ module Unix
       return PlaceHolderAttributes.new(), false
     end
 
-    return PlaceHolderFromData(absolutePath, Array[byte].new(data)), true
+    return PlaceHolderFromData(absolutePath, Array[byte].(data)), true
   end
 
   # DefaultData is the lambda in openVFSfuse_getxattr(): the attributes handed

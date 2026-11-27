@@ -15,78 +15,50 @@ module Unix
   # the same functions the C++ calls, they are just variables now.
   class Platform
     # Xattr*, the l*xattr family: no following of a final symlink.
-    # func(path, name string, value []byte) (int, error)
-    attr_accessor :XattrGet, Proc
-    # func(path, name string, value []byte, flags int) error
-    attr_accessor :XattrSet, Proc
-    # func(path string, list []byte) (int, error)
-    attr_accessor :XattrList, Proc
-    # func(path, name string) error
-    attr_accessor :XattrRemove, Proc
+    attr_accessor :XattrGet, Proc[string, string, Array[byte], [int, error]]
+    attr_accessor :XattrSet, Proc[string, string, Array[byte], int, [error]]
+    attr_accessor :XattrList, Proc[string, Array[byte], [int, error]]
+    attr_accessor :XattrRemove, Proc[string, string, [error]]
 
     # IsErrNoAttr reports a missing attribute: ENODATA on Linux, ENOATTR on
     # macOS.
-    # func(err error) bool
-    attr_accessor :IsErrNoAttr, Proc
+    attr_accessor :IsErrNoAttr, Proc[error, [bool]]
 
     # CallerName is getcallername(): /proc/<pid>/exe on Linux, KERN_PROCARGS2
     # on macOS.
-    # func(pid uint32) string
-    attr_accessor :CallerName, Proc
+    attr_accessor :CallerName, Proc[uint32, [string]]
     # CallerIsThreadOfProcess answers the /proc/<pid>/task/<tid> question,
     # which upstream short circuits to false under __APPLE__.
-    # func(callerThreadID uint32, processID int64) bool
-    attr_accessor :CallerIsThreadOfProcess, Proc
+    attr_accessor :CallerIsThreadOfProcess, Proc[uint32, int64, [bool]]
 
     # StatMode widens st_mode, which is 32 bit on Linux and 16 bit on macOS.
-    # func(st *unix.Stat_t) uint32
-    attr_accessor :StatMode, Proc
+    attr_accessor :StatMode, Proc[@@unix.Stat_t, [uint32]]
     # FillStatfs maps struct statfs onto the fuse reply; macOS carries neither
     # f_namemax nor f_frsize.
-    # func(out *gofuse.StatfsOut, st *unix.Statfs_t)
-    attr_accessor :FillStatfs, Proc
+    attr_accessor :FillStatfs, Proc[@@gofuse.StatfsOut, @@unix.Statfs_t]
     # MknodAt and MkfifoAt stand in for the syscalls macOS does not have.
-    # func(dirfd int, rel string, mode uint32, dev uint32) error
-    attr_accessor :MknodAt, Proc
-    # func(dirfd int, rel string, mode uint32) error
-    attr_accessor :MkfifoAt, Proc
+    attr_accessor :MknodAt, Proc[int, string, uint32, uint32, [error]]
+    attr_accessor :MkfifoAt, Proc[int, string, uint32, [error]]
 
     # LogToSyslog mirrors a log line into syslog, which upstream does on
     # everything but Apple.
-    # func(message string)
-    attr_accessor :LogToSyslog, Proc
+    attr_accessor :LogToSyslog, Proc[string]
   end
 
   # The shared layer calls these under the names the C++ uses.
 
-  # func(path, name string, value []byte) (int, error)
-  var :xattrGet, Proc
-  # func(path, name string, value []byte, flags int) error
-  var :xattrSet, Proc
-  # func(path string, list []byte) (int, error)
-  var :xattrList, Proc
-  # func(path, name string) error
-  var :xattrRemove, Proc
-
-  # func(err error) bool
-  var :isErrNoAttr, Proc
-
-  # func(pid uint32) string
-  var :getcallernameByPid, Proc
-  # func(callerThreadID uint32, processID int64) bool
-  var :callerIsThreadOfProcess, Proc
-
-  # func(st *unix.Stat_t) uint32
-  var :statMode, Proc
-  # func(out *gofuse.StatfsOut, st *unix.Statfs_t)
-  var :fillStatfs, Proc
-  # func(dirfd int, rel string, mode uint32, dev uint32) error
-  var :mknodAt, Proc
-  # func(dirfd int, rel string, mode uint32) error
-  var :mkfifoAt, Proc
-
-  # func(message string)
-  var :logToSyslog, Proc
+  var :xattrGet, Proc[string, string, Array[byte], [int, error]]
+  var :xattrSet, Proc[string, string, Array[byte], int, [error]]
+  var :xattrList, Proc[string, Array[byte], [int, error]]
+  var :xattrRemove, Proc[string, string, [error]]
+  var :isErrNoAttr, Proc[error, [bool]]
+  var :getcallernameByPid, Proc[uint32, [string]]
+  var :callerIsThreadOfProcess, Proc[uint32, int64, [bool]]
+  var :statMode, Proc[@@unix.Stat_t, [uint32]]
+  var :fillStatfs, Proc[@@gofuse.StatfsOut, @@unix.Statfs_t]
+  var :mknodAt, Proc[int, string, uint32, uint32, [error]]
+  var :mkfifoAt, Proc[int, string, uint32, [error]]
+  var :logToSyslog, Proc[string]
 
   # platformInstalled reports whether SetPlatform has run. Every entry point
   # checks it, so importing this package without its OS half fails with a clear

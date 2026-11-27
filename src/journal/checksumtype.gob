@@ -7,8 +7,8 @@ id INTEGER PRIMARY KEY,
 name TEXT UNIQUE
 );`
 
-  class ChecksumAlgorithm < int
-    def String # () -> string
+  var ChecksumAlgorithm = Class.new(int) do
+    protected def String # () -> string
       case self
       when ChecksumSHA3_256
         return "SHA3-256"
@@ -99,7 +99,7 @@ name TEXT UNIQUE
     attr_accessor :checksum, string
     attr_accessor :err, string
 
-    def MakeChecksumHeader # () -> string
+    protected def MakeChecksumHeader # () -> string
       unless self.IsValid()
         return ""
       end
@@ -107,19 +107,19 @@ name TEXT UNIQUE
       return self.checksumType.String() + ":" + self.checksum
     end
 
-    def Type # () -> ChecksumAlgorithm
+    protected def Type # () -> ChecksumAlgorithm
       return self.checksumType
     end
 
-    def Checksum # () -> string
+    protected def Checksum # () -> string
       return self.checksum
     end
 
-    def Error # () -> string
+    protected def Error # () -> string
       return self.err
     end
 
-    def IsValid # () -> bool
+    protected def IsValid # () -> bool
       return self.checksumType != ChecksumNone && self.checksumType != ChecksumParseError && self.checksum != ""
     end
   end

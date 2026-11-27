@@ -39,7 +39,7 @@ module Main
     syncer = directory.NewSyncer(root, ignored, journal, lambda { |event| # (directory.Event)
       case
       when events << event
-      when ~ctx.Done()
+      when ctx.Done().<<
       end
     })
 
@@ -53,7 +53,7 @@ module Main
       openvfs.ServeAPI(ctx, socketPath, lambda { |event| # (directory.Event)
         case
         when events << event
-        when ~ctx.Done()
+        when ctx.Done().<<
         end
       })
     }.()
@@ -62,7 +62,7 @@ module Main
       openvfs.Run(ctx, root, "openvfs:local", socketPath, lambda { |event| # (directory.Event)
         case
         when events << event
-        when ~ctx.Done()
+        when ctx.Done().<<
         end
       })
     }.()
@@ -71,7 +71,7 @@ module Main
       directory.RunWatcher(ctx, root, ignored, lambda { |event| # (directory.Event)
         case
         when events << event
-        when ~ctx.Done()
+        when ctx.Done().<<
         end
       })
     }.()
@@ -80,16 +80,16 @@ module Main
       directory.RunPoller(ctx, 30 * time.Second, lambda { |event| # (directory.Event)
         case
         when events << event
-        when ~ctx.Done()
+        when ctx.Done().<<
         end
       })
     }.()
 
     loop do
       case
-      when ~ctx.Done()
+      when ctx.Done().<<
         return
-      when event = ~events
+      when event = events.<<
         if event.Kind == directory.Poll
           syncer.Request(directory.SyncRequest.new(Cause: event))
           next

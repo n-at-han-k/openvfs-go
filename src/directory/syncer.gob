@@ -41,7 +41,7 @@ module Directory
     attr_accessor :renamedItemsLocal, Hash[string, string]
     attr_accessor :renamedItemsRemote, Hash[string, string]
     attr_accessor :deletedItem, Hash[string, @@SyncFileItem]
-    attr_accessor :forbiddenDeletes, Hash[string, bool]
+    attr_accessor :forbiddenDeletes, Hash[string, Struct[]]
     attr_accessor :anotherSyncNeeded, bool
 
     # vfs hooks. Nil means Vfs::Mode::Off, which is what the plain
@@ -56,7 +56,7 @@ module Directory
     # func(item *SyncFileItem)
     attr_accessor :onItemDiscovered, Proc
 
-    def self.Request(req) # (SyncRequest) -> bool
+    def Request(req) # (SyncRequest) -> bool
       case
       when self.requests << req
         return true
@@ -65,22 +65,22 @@ module Directory
       end
     end
 
-    def self.Run(ctx) # (context.Context)
+    def Run(ctx) # (context.Context)
       loop do
         case
-        when ~ctx.Done()
+        when ctx.Done().<<
           return
-        when req = ~self.requests
+        when req = self.requests.<<
           self.sync(ctx, req)
         end
       end
     end
 
-    def self.sync(ctx, req) # (context.Context, SyncRequest)
+    def sync(ctx, req) # (context.Context, SyncRequest)
       # Phase 1: local discovery. Every entry goes onto the bus as it is found.
       err = self.scanner.Scan(lambda { |entry| # (Event)
         case
-        when ~ctx.Done()
+        when ctx.Done().<<
         else
           self.onChange(entry)
         end
@@ -98,7 +98,7 @@ module Directory
     end
 
     # isRenamed is DiscoveryPhase::isRenamed() (discoveryphase.h:160).
-    def self.isRenamed(p) # (string) -> bool
+    def isRenamed(p) # (string) -> bool
       if (_, ok = self.renamedItemsLocal[p])
         return true
       end
@@ -110,7 +110,7 @@ module Directory
 
     # adjustRenamedPath is OCC::adjustRenamedPath(): rewrite a path through the
     # longest already-renamed parent.
-    def self.adjustRenamedPath(original, d) # (string, Direction) -> string
+    def adjustRenamedPath(original, d) # (string, Direction) -> string
       renamed = self.renamedItemsLocal
 
       if d == DirectionDown
@@ -137,7 +137,7 @@ module Directory
     # findAndCancelDeletedJob is DiscoveryPhase::findAndCancelDeletedJob(): if the
     # same path was already discovered as a delete, cancel that delete and report
     # its etag, which turns a DELETE+NEW pair into a rename.
-    def self.findAndCancelDeletedJob(originalPath) # (string) -> (bool, string)
+    def findAndCancelDeletedJob(originalPath) # (string) -> (bool, string)
       item, ok = self.deletedItem[originalPath]
 
       unless ok
@@ -165,7 +165,7 @@ module Directory
     # processFile — discovery.cpp:227-287. Reconcile one name's three inputs. It
     # delegates to the two analyze functions; the scan decides which names get
     # here.
-    def self.processFile(path, localEntry, serverEntry, dbEntry, queryLocal, queryServer) # (PathTuple, LocalInfo, RemoteFileData, journal.SyncJournalFileRecord, QueryMode, QueryMode)
+    def processFile(path, localEntry, serverEntry, dbEntry, queryLocal, queryServer) # (PathTuple, LocalInfo, RemoteFileData, journal.SyncJournalFileRecord, QueryMode, QueryMode)
       # The modes are the scan's, decided per directory. They live here because
       # the analyze functions read them off the job upstream.
       self.queryLocal, self.queryServer = queryLocal, queryServer
@@ -215,7 +215,7 @@ module Directory
 
     # processFileAnalyzeRemoteInfo — discovery.cpp:304-539. Runs when the server
     # reported an entry; typically flows into processFileAnalyzeLocalInfo.
-    def self.processFileAnalyzeRemoteInfo(item, path, localEntry, serverEntry, dbEntry) # (*SyncFileItem, PathTuple, LocalInfo, RemoteFileData, journal.SyncJournalFileRecord)
+    def processFileAnalyzeRemoteInfo(item, path, localEntry, serverEntry, dbEntry) # (*SyncFileItem, PathTuple, LocalInfo, RemoteFileData, journal.SyncJournalFileRecord)
       item.ChecksumHeader = serverEntry.ChecksumHeader()
       item.FileID = serverEntry.FileID()
       item.RemotePerm = serverEntry.RemotePerm()
@@ -446,7 +446,7 @@ module Directory
 
     # computeServerModified is the immediately-invoked serverModified closure of
     # discovery.cpp:540-873; Gob has no spelling for an invoked lambda.
-    def self.computeServerModified(item, localEntry, dbEntry) # (*SyncFileItem, LocalInfo, journal.SyncJournalFileRecord) -> bool
+    def computeServerModified(item, localEntry, dbEntry) # (*SyncFileItem, LocalInfo, journal.SyncJournalFileRecord) -> bool
       modifiedOnServer = item.Instruction() &
         (InstructionNew | InstructionSync | InstructionRename | InstructionTypeChange) != 0
 
@@ -471,7 +471,7 @@ module Directory
 
     # processFileAnalyzeLocalInfo — discovery.cpp:540-873. Reconciles the local
     # side, having already folded in whatever the server said.
-    def self.processFileAnalyzeLocalInfo(item, path, localEntry, serverEntry, dbEntry, recurseQueryServer) # (*SyncFileItem, PathTuple, LocalInfo, RemoteFileData, journal.SyncJournalFileRecord, QueryMode)
+    def processFileAnalyzeLocalInfo(item, path, localEntry, serverEntry, dbEntry, recurseQueryServer) # (*SyncFileItem, PathTuple, LocalInfo, RemoteFileData, journal.SyncJournalFileRecord, QueryMode)
       noServerEntry = (self.queryServer != ParentNotChanged && !serverEntry.IsValid()) ||
         (self.queryServer == ParentNotChanged && !dbEntry.IsValid())
 
@@ -682,7 +682,7 @@ module Directory
       originalPath = base.Path
 
       # Gradually check the conditions for accepting a move candidate.
-      moveCheck = lambda { # () -> bool
+      moveCheck = lambda { || # () -> bool
         unless base.IsValid()
           log.Printf("discovery: not a move, no item in db with inode %d", localEntry.Inode())
           return false
@@ -804,7 +804,7 @@ module Directory
     end
 
     # processFileConflict — discovery.cpp:875-944.
-    def self.processFileConflict(item, path, localEntry, serverEntry, dbEntry) # (*SyncFileItem, PathTuple, LocalInfo, RemoteFileData, journal.SyncJournalFileRecord)
+    def processFileConflict(item, path, localEntry, serverEntry, dbEntry) # (*SyncFileItem, PathTuple, LocalInfo, RemoteFileData, journal.SyncJournalFileRecord)
       item.PreviousSize = localEntry.Size()
       item.PreviousModtime = localEntry.ModTime()
 
@@ -887,7 +887,7 @@ module Directory
     # processFileFinalize is the non-recursive part of discovery.cpp:946-990. The
     # sub-directory job scheduling it does upstream needs the per-directory job,
     # which is not ported.
-    def self.processFileFinalize(item, path, recurse, recurseQueryLocal, recurseQueryServer) # (*SyncFileItem, PathTuple, bool, QueryMode, QueryMode)
+    def processFileFinalize(item, path, recurse, recurseQueryLocal, recurseQueryServer) # (*SyncFileItem, PathTuple, bool, QueryMode, QueryMode)
       if path.Original != path.Target &&
         item.Instruction() & (InstructionUpdateMetadata | InstructionNone) != 0
         # Otherwise subitems are not updated.
@@ -921,18 +921,18 @@ module Directory
       self.emitItemDiscovered(item)
     end
 
-    def self.emitItemDiscovered(item) # (*SyncFileItem)
+    def emitItemDiscovered(item) # (*SyncFileItem)
       if self.onItemDiscovered != nil
         self.onItemDiscovered(item)
       end
     end
 
     # dbError is ProcessDirectoryJob::dbError().
-    def self.dbError(err) # (error)
+    def dbError(err) # (error)
       log.Printf("discovery: error while reading the database: %v", err)
     end
 
-    def self.vfsNeedsMetadataUpdate(item) # (*SyncFileItem) -> bool
+    def vfsNeedsMetadataUpdate(item) # (*SyncFileItem) -> bool
       if self.needsMetadataUpdate == nil
         return false
       end
@@ -940,7 +940,7 @@ module Directory
       return self.needsMetadataUpdate(item)
     end
 
-    def self.vfsIsDehydratedPlaceholder(absPath) # (string) -> bool
+    def vfsIsDehydratedPlaceholder(absPath) # (string) -> bool
       if self.isDehydratedPlaceholder == nil
         return false
       end
@@ -961,7 +961,7 @@ module Directory
       renamedItemsLocal: make(Hash[string, string]),
       renamedItemsRemote: make(Hash[string, string]),
       deletedItem: make(Hash[string, @@SyncFileItem]),
-      forbiddenDeletes: make(Hash[string, bool])
+      forbiddenDeletes: make(Hash[string, Struct[]])
     )
 
     # The scan's job is the per-directory join; deciding what each merged name
@@ -976,8 +976,8 @@ module Directory
   # EventKind, which is what happened to it.
   # ===========================================================================
 
-  class SyncInstruction < uint16
-    def String # () -> string
+  var SyncInstruction = Class.new(uint16) do
+    protected def String # () -> string
       case self
       when InstructionNone
         return "None"
@@ -1028,8 +1028,8 @@ module Directory
   # Direction is SyncFileItem::Direction (syncfileitem.h:46-50). Paired with the
   # instruction it is what OwncloudPropagator::createJob switches on: Sync+Up is
   # an upload, Sync+Down a download.
-  class Direction < uint8
-    def String # () -> string
+  var Direction = Class.new(uint8) do
+    protected def String # () -> string
       case self
       when DirectionUp
         return "Up"
@@ -1046,8 +1046,7 @@ module Directory
   const :DirectionDown, 2
 
   # QueryMode is ProcessDirectoryJob::QueryMode (discovery.h:54-60).
-  class QueryMode < uint8
-  end
+  var QueryMode = Class.new(uint8)
 
   const :NormalQuery, 0
   # Do not query this folder because it does not exist
@@ -1058,8 +1057,7 @@ module Directory
   const :InBlackList, 3
 
   # PinState is the subset of OCC::PinState the reconcile needs.
-  class PinState < uint8
-  end
+  var PinState = Class.new(uint8)
 
   const :PinStateUnspecified, 0
   const :PinStateAlwaysLocal, 1
@@ -1082,7 +1080,7 @@ module Directory
     attr_accessor :Local, string
 
     # AddName is PathTuple::addName().
-    def AddName(name) # (string) -> PathTuple
+    protected def AddName(name) # (string) -> PathTuple
       out = PathTuple.new(Original: pathAppend(self.Original, name))
 
       build = lambda { |other| # (string) -> string
@@ -1159,26 +1157,26 @@ module Directory
 
     attr_accessor :instruction, SyncInstruction
 
-    def self.LocalName # () -> string
+    def LocalName # () -> string
       return self.localName
     end
 
-    def self.SetLocalName(name) # (string)
+    def SetLocalName(name) # (string)
       self.localName = name
     end
 
-    def self.Instruction # () -> SyncInstruction
+    def Instruction # () -> SyncInstruction
       return self.instruction
     end
 
     # SetInstruction is SyncFileItem::setInstruction(): only one instruction is
     # allowed, so the value must be a single bit.
-    def self.SetInstruction(instruction) # (SyncInstruction)
+    def SetInstruction(instruction) # (SyncInstruction)
       self.instruction = instruction
     end
 
     # Destination is SyncFileItem::destination().
-    def self.Destination # () -> string
+    def Destination # () -> string
       if self.RenameTarget != ""
         return self.RenameTarget
       end
@@ -1186,18 +1184,17 @@ module Directory
       return self.localName
     end
 
-    def self.IsDirectory # () -> bool
+    def IsDirectory # () -> bool
       return self.Type == journal.ItemTypeDirectory
     end
 
-    def self.IsVirtualFile # () -> bool
+    def IsVirtualFile # () -> bool
       return self.Type == journal.ItemTypeVirtualFile || self.Type == journal.ItemTypeVirtualFileDownload
     end
   end
 
   # ItemStatus is SyncFileItem::Status (syncfileitem.h:53-).
-  class ItemStatus < uint8
-  end
+  var ItemStatus = Class.new(uint8)
 
   const :StatusNoStatus, 0
   const :StatusFatalError, 1

@@ -25,11 +25,11 @@ module Directory
     # func(dir string) ([]RemoteFileData, error)
     attr_accessor :remoteEntries, Proc
 
-    def self.Scan(onChange) # func(Event) -> error
+    def Scan(onChange) # func(Event) -> error
       return self.process(PathTuple.new(), onChange)
     end
 
-    def self.process(current, onChange) # PathTuple, func(Event) -> error
+    def process(current, onChange) # PathTuple, func(Event) -> error
       queryServer = self.queryServer
 
       if self.remoteEntries == nil
@@ -142,7 +142,7 @@ module Directory
       return nil
     end
 
-    def self.handleExcluded(path, isHidden) # (string, bool) -> bool
+    def handleExcluded(path, isHidden) # (string, bool) -> bool
       if isHidden && self.ignoreHiddenFiles
         return true
       end
@@ -166,7 +166,7 @@ module Directory
     attr_accessor :Modified, Array[Event]
     attr_accessor :Removed, Array[Event]
 
-    def Events # () -> []Event
+    protected def Events # () -> []Event
       all = make(Array[Event], 0, len(self.Added) + len(self.Modified) + len(self.Removed))
       all = append(all, *self.Added)
       all = append(all, *self.Modified)

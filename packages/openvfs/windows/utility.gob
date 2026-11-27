@@ -44,28 +44,28 @@ module Windows
     attr_accessor :path, string
 
     # IsValid is Handle::operator bool().
-    def self.IsValid # () -> bool
+    def IsValid # () -> bool
       return self != nil && self.handle != windows.InvalidHandle
     end
 
-    def self.Handle # () -> windows.Handle
+    def Handle # () -> windows.Handle
       return self.handle
     end
 
-    def self.Path # () -> string
+    def Path # () -> string
       return self.path
     end
 
-    def self.Error # () -> windows.Errno
+    def Error # () -> windows.Errno
       return self.err
     end
 
     # ErrorMessage is Handle::errorMessage().
-    def self.ErrorMessage # () -> string
+    def ErrorMessage # () -> string
       return FormatWinError(int32(self.err))
     end
 
-    def self.Close # ()
+    def Close # ()
       if self != nil && self.handle != windows.InvalidHandle
         _ = windows.CloseHandle(self.handle)
         self.handle = windows.InvalidHandle
@@ -192,7 +192,7 @@ module Windows
       canonical = resolved
     end
 
-    sum = sha256.Sum256(Array[byte].new(canonical))
+    sum = sha256.Sum256(Array[byte].(canonical))
     stableFolderHash = hex.EncodeToString(sum[])
 
     return fmt.Sprintf("%s!%s!%s!%s", providerName, windowsSid, accountUUID, stableFolderHash)

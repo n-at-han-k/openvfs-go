@@ -13,51 +13,51 @@ module Directory
     attr_accessor :inode, uint64
     attr_accessor :isHidden, bool
 
-    def IsHidden # () -> bool
+    protected def IsHidden # () -> bool
       return self.isHidden
     end
 
-    def Name # () -> string
+    protected def Name # () -> string
       return self.name
     end
 
-    def Path # () -> string
+    protected def Path # () -> string
       return self.path
     end
 
-    def ModTime # () -> int64
+    protected def ModTime # () -> int64
       return self.modtime
     end
 
-    def Size # () -> int64
+    protected def Size # () -> int64
       return self.size
     end
 
-    def Inode # () -> uint64
+    protected def Inode # () -> uint64
       return self.inode
     end
 
-    def Type # () -> journal.ItemType
+    protected def Type # () -> journal.ItemType
       return self.typ
     end
 
-    def self.SetType(typ) # (journal.ItemType)
+    def SetType(typ) # (journal.ItemType)
       self.typ = typ
     end
 
-    def IsDirectory # () -> bool
+    protected def IsDirectory # () -> bool
       return self.typ == journal.ItemTypeDirectory
     end
 
-    def IsVirtualFile # () -> bool
+    protected def IsVirtualFile # () -> bool
       return self.typ == journal.ItemTypeVirtualFile || self.typ == journal.ItemTypeVirtualFileDownload
     end
 
-    def IsSymLink # () -> bool
+    protected def IsSymLink # () -> bool
       return self.typ == journal.ItemTypeSymLink
     end
 
-    def IsValid # () -> bool
+    protected def IsValid # () -> bool
       return self.name != ""
     end
   end

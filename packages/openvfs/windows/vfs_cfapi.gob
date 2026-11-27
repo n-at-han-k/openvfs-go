@@ -19,6 +19,10 @@ module Windows
   # and the fetch-data handler. Here a single goroutine draining tasks plays that
   # role, and post() is the QTimer::singleShot(0, ...) / queued invokeMethod.
   class VfsCfApi
+    # Go satisfies Vfs implicitly; upstream's compile-time assertion is
+    # `var _ Vfs = (*VfsCfApi)(nil)`.
+    include Vfs
+
     attr_accessor :params, SetupParams
     attr_accessor :callbacks, Callbacks
 
@@ -27,18 +31,18 @@ module Windows
 
     # func()
     attr_accessor :tasks, Chan[Proc]
-    attr_accessor :stopTasks, Chan[bool]
+    attr_accessor :stopTasks, Chan[Struct[]]
     attr_accessor :stopOnce, sync.Once
     attr_accessor :registryID, uint64
     attr_accessor :token, @@callbackToken
 
     # runTasks is the main thread upstream asserts it is on.
-    def self.runTasks # ()
+    def runTasks # ()
       loop do
         case
-        when ~self.stopTasks
+        when self.stopTasks.<<
           return
-        when task = ~self.tasks
+        when task = self.tasks.<<
           task()
         end
       end
@@ -47,37 +51,37 @@ module Windows
     # post queues work onto the task goroutine. Windows calls the cloud filter
     # callbacks on its own threads, so everything touching hydrationJobs goes
     # through here.
-    def self.post(task) # func() -> ()
+    def post(task) # func()
       case
       when self.tasks << task
-      when ~self.stopTasks
+      when self.stopTasks.<<
       end
     end
 
     # callbackContext is the opaque context handed to CfConnectSyncRoot.
-    def self.callbackContext # () -> unsafe.Pointer
+    def callbackContext # () -> unsafe.Pointer
       return registerVfs(self)
     end
 
     # Params is Vfs::params().
-    def self.Params # () -> SetupParams
+    def Params # () -> SetupParams
       return self.params
     end
 
     # Mode is VfsCfApi::mode().
-    def self.Mode # () -> Mode
+    def Mode # () -> Mode
       return ModeWindowsCfApi
     end
 
     # Start is Vfs::start(), which stores the parameters and calls startImpl().
-    def self.Start(params, callbacks) # (SetupParams, Callbacks)
+    def Start(params, callbacks) # (SetupParams, Callbacks)
       self.params = params
       self.callbacks = callbacks
       self.startImpl(params)
     end
 
     # startImpl is VfsCfApi::startImpl().
-    def self.startImpl(params) # (SetupParams)
+    def startImpl(params) # (SetupParams)
       RegisterSyncRoot(params, lambda { |errorMessage| # (string)
         if errorMessage == ""
           connectResult, err = ConnectSyncRoot(self.params.Root, self)
@@ -102,7 +106,7 @@ module Windows
     end
 
     # Stop is VfsCfApi::stop().
-    def self.Stop # ()
+    def Stop # ()
       if self.connectionKey != 0
         if (err = DisconnectSyncRoot(self.connectionKey))
           lcCfApi.Critical("Disconnect failed for %s : %v", self.params.FilesystemPath(), err)
@@ -118,7 +122,7 @@ module Windows
     end
 
     # UnregisterFolder is VfsCfApi::unregisterFolder().
-    def self.UnregisterFolder # ()
+    def UnregisterFolder # ()
       if (err = UnregisterSyncRoot(self.params))
         lcCfApi.Critical("Unregistration failed for %s : %v", self.params.FilesystemPath(), err)
       end
@@ -126,12 +130,12 @@ module Windows
 
     # SocketAPIPinStateActionsShown is
     # VfsCfApi::socketApiPinStateActionsShown().
-    def self.SocketAPIPinStateActionsShown # () -> bool
+    def SocketAPIPinStateActionsShown # () -> bool
       return false
     end
 
     # updateMetadata is VfsCfApi::updateMetadata().
-    def self.updateMetadata(syncItem, filePath, replacesFile) # (SyncFileItem, string, string) -> (ConvertToPlaceholderResult, error)
+    def updateMetadata(syncItem, filePath, replacesFile) # (SyncFileItem, string, string) -> (ConvertToPlaceholderResult, error)
       replacesPath = ""
 
       if replacesFile != ""
@@ -163,18 +167,18 @@ module Windows
     end
 
     # UpdateMetadata exposes the protected updateMetadata() hook.
-    def self.UpdateMetadata(syncItem, filePath, replacesFile) # (SyncFileItem, string, string) -> (ConvertToPlaceholderResult, error)
+    def UpdateMetadata(syncItem, filePath, replacesFile) # (SyncFileItem, string, string) -> (ConvertToPlaceholderResult, error)
       return self.updateMetadata(syncItem, filePath, replacesFile)
     end
 
     # CreatePlaceholder is VfsCfApi::createPlaceholder().
-    def self.CreatePlaceholder(item) # (SyncFileItem) -> error
+    def CreatePlaceholder(item) # (SyncFileItem) -> error
       return CreatePlaceholderInfo(filepath.Join(self.params.Root, item.LocalName),
         item.Modtime, item.Size, item.FileID, item.Type == ItemTypeDirectory)
     end
 
     # NeedsMetadataUpdate is VfsCfApi::needsMetadataUpdate().
-    def self.NeedsMetadataUpdate(item) # (SyncFileItem) -> bool
+    def NeedsMetadataUpdate(item) # (SyncFileItem) -> bool
       handle = CreateHandleDefault(filepath.Join(self.params.Root, item.LocalName))
       defer handle.Close()
 
@@ -192,12 +196,12 @@ module Windows
     end
 
     # IsDehydratedPlaceholder is VfsCfApi::isDehydratedPlaceholder().
-    def self.IsDehydratedPlaceholder(filePath) # (string) -> bool
+    def IsDehydratedPlaceholder(filePath) # (string) -> bool
       return IsDehydratedPlaceholder(filePath)
     end
 
     # StatTypeVirtualFile is VfsCfApi::statTypeVirtualFile().
-    def self.StatTypeVirtualFile(fileInfo) # (LocalInfo) -> LocalInfo
+    def StatTypeVirtualFile(fileInfo) # (LocalInfo) -> LocalInfo
       # only get placeholder info if it's a file
       if fileInfo.Type == ItemTypeFile
         handle = CreateHandleDefault(fileInfo.Path)
@@ -243,7 +247,7 @@ module Windows
     end
 
     # SetPinState is VfsCfApi::setPinState().
-    def self.SetPinState(folderPath, state) # (string, PinState) -> bool
+    def SetPinState(folderPath, state) # (string, PinState) -> bool
       lcCfApi.Debug("setPinState %s %d", folderPath, state)
 
       localPath = filepath.Join(self.params.Root, folderPath)
@@ -262,7 +266,7 @@ module Windows
     end
 
     # PinState is VfsCfApi::pinState().
-    def self.PinState(folderPath) # (string) -> (PinState, bool)
+    def PinState(folderPath) # (string) -> (PinState, bool)
       localPath = filepath.Join(self.params.Root, folderPath)
       handle = CreateHandleDefault(localPath)
       defer handle.Close()
@@ -285,7 +289,7 @@ module Windows
     end
 
     # Availability is VfsCfApi::availability().
-    def self.Availability(folderPath) # (string) -> AvailabilityResult
+    def Availability(folderPath) # (string) -> AvailabilityResult
       basePinState, ok = self.PinState(folderPath)
 
       if ok
@@ -307,7 +311,7 @@ module Windows
 
     # CancelHydration is VfsCfApi::cancelHydration(). It must run on the task
     # goroutine, which is where the cancel callback posts it.
-    def self.CancelHydration(context) # (CallBackContext)
+    def CancelHydration(context) # (CallBackContext)
       # Find matching hydration job for request id
       if (hydrationJob, ok = self.hydrationJobs[context.TransferKey])
         lcCfApi.Info("Cancel hydration %s", hydrationJob.Context())
@@ -317,7 +321,7 @@ module Windows
     end
 
     # FileStatusChanged is VfsCfApi::fileStatusChanged().
-    def self.FileStatusChanged(systemFileName, fileStatus) # (string, SyncFileStatusTag)
+    def FileStatusChanged(systemFileName, fileStatus) # (string, SyncFileStatusTag)
       handle = CreateHandleDefault(systemFileName)
       defer handle.Close()
 
@@ -349,19 +353,12 @@ module Windows
     end
   end
 
-  # compile-time check that the plugin satisfies the interface it is selected by.
-  #
-  # NOT PORTED. Gob has no spelling for a blank package-level assignment with a
-  # pointer conversion:
-  #
-  #	var _ Vfs = (*VfsCfApi)(nil)
-
   # NewVfsCfApi is the VfsCfApi constructor.
   def NewVfsCfApi # () -> *VfsCfApi
     v = @VfsCfApi.new(
       hydrationJobs: Hash[int64, @@CfApiHydrationJob].new(),
       tasks: make(Chan[Proc], 64),
-      stopTasks: make(Chan[bool])
+      stopTasks: make(Chan[Struct[]])
     )
 
     go lambda {
@@ -374,12 +371,12 @@ module Windows
   # CfApiVfsPluginFactory is the class of the same name.
   class CfApiVfsPluginFactory
     # Create is DefaultPluginFactory<VfsCfApi>::create().
-    def Create # () -> Vfs
+    protected def Create # () -> Vfs
       return NewVfsCfApi()
     end
 
     # Prepare is CfApiVfsPluginFactory::prepare().
-    def Prepare(path, accountUUID) # (string, string) -> error
+    protected def Prepare(path, accountUUID) # (string, string) -> error
       if isRootPath(path)
         return fmt.Errorf("The Virtual filesystem feature does not support a drive as sync root")
       end

@@ -11,12 +11,12 @@ module Windows
   # in this package is driven by the desktop client instead.
 
   # Run reports that the fuse filesystem has no Windows counterpart.
-  def Run(ctx, root, owner, socketPath, onChange) # context.Context, string, string, string, func(directory.Event) -> ()
+  def Run(ctx, root, owner, socketPath, onChange) # context.Context, string, string, string, func(directory.Event)
     log.Printf("openvfs: the fuse filesystem is not available on Windows; the cloud filter is the provider")
   end
 
   # ServeAPI reports that the socket API has no Windows counterpart.
-  def ServeAPI(ctx, socketPath, onChange) # context.Context, string, func(directory.Event) -> ()
+  def ServeAPI(ctx, socketPath, onChange) # context.Context, string, func(directory.Event)
     log.Printf("openvfs: the socket API is not available on Windows; the cloud filter has no such protocol")
   end
 

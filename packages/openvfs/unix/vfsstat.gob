@@ -14,7 +14,7 @@ module Unix
       return PlaceHolderFromData(path, nil)
     end
 
-    return PlaceHolderFromData(path, Array[byte].new(data))
+    return PlaceHolderFromData(path, Array[byte].(data))
   end
 
   def statEntry(path) # (string)
@@ -40,7 +40,7 @@ module Unix
 
   # center is std::format's '^' alignment.
   def center(s, width) # (string, int) -> string
-    n = len(Array[rune].new(s))
+    n = len(Array[rune].(s))
 
     if n >= width
       return s

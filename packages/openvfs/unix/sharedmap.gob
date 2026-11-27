@@ -8,8 +8,8 @@ module Unix
 
   # HydJobState is the state a hydration job can be in. A job starts out Running
   # and is moved to one of the other states by the socket thread.
-  class HydJobState < int
-    def String # () -> string
+  var HydJobState = Class.new(int) do
+    protected def String # () -> string
       case self
       when HydSuccess
         return "success"
@@ -33,8 +33,7 @@ module Unix
 
   # HydJobResult is the outcome of a hydration job after it left the Running
   # state.
-  class HydJobResult < int
-  end
+  var HydJobResult = Class.new(int)
 
   # the client reported the file as hydrated
   const :HydResultSucceeded, 0
@@ -50,11 +49,11 @@ module Unix
     attr_accessor :data, Hash[int, HydJob]
     # waiters stands in for _cv: closing a channel wakes its waiter, which
     # then re-evaluates the predicate the way condition_variable::wait() does.
-    attr_accessor :waiters, Array[Chan[bool]]
+    attr_accessor :waiters, Array[Chan[Struct[]]]
     attr_accessor :pid, int64
 
     # notifyAllLocked is _cv.notify_all().
-    def self.notifyAllLocked # ()
+    def notifyAllLocked # ()
       self.waiters.each do |_, ch|
         close(ch)
       end
@@ -62,14 +61,14 @@ module Unix
       self.waiters = nil
     end
 
-    def self.Insert(key, value) # (int, HydJob)
+    def Insert(key, value) # (int, HydJob)
       self.mu.Lock()
       defer self.mu.Unlock()
       self.data[key] = value
       self.notifyAllLocked()
     end
 
-    def self.Get(key) # (int) -> (HydJob, bool)
+    def Get(key) # (int) -> (HydJob, bool)
       self.mu.Lock()
       defer self.mu.Unlock()
 
@@ -78,7 +77,7 @@ module Unix
       return job, ok
     end
 
-    def self.Set(key, value) # (int, HydJob) -> bool
+    def Set(key, value) # (int, HydJob) -> bool
       self.mu.Lock()
       defer self.mu.Unlock()
 
@@ -92,7 +91,7 @@ module Unix
       return true
     end
 
-    def self.Remove(id) # (int) -> bool
+    def Remove(id) # (int) -> bool
       self.mu.Lock()
       defer self.mu.Unlock()
 
@@ -111,7 +110,7 @@ module Unix
     #
     # The wait is bounded by wall-clock time rather than by a number of polls, and
     # a state change is observed as soon as the socket thread publishes it.
-    def self.WaitForJob(key, timeout) # (int, time.Duration) -> HydJobResult
+    def WaitForJob(key, timeout) # (int, time.Duration) -> HydJobResult
       deadline = time.Now().Add(timeout)
 
       self.mu.Lock()
@@ -141,15 +140,15 @@ module Unix
           return HydResultTimedOut
         end
 
-        ch = make(Chan[bool])
+        ch = make(Chan[Struct[]])
         self.waiters = append(self.waiters, ch)
         self.mu.Unlock()
 
         timer = time.NewTimer(remaining)
 
         case
-        when ~ch
-        when ~timer.C
+        when ch.<<
+        when timer.C.<<
         end
 
         timer.Stop()
@@ -161,7 +160,7 @@ module Unix
 
     # dropWaiterLocked forgets a channel that was woken by the deadline rather than
     # by a notification, so a run of timeouts cannot grow the waiter list.
-    def self.dropWaiterLocked(ch) # (chan bool)
+    def dropWaiterLocked(ch) # (chan bool)
       self.waiters.each do |i, c|
         if c == ch
           self.waiters = append(self.waiters[...i], *self.waiters[i + 1...])
@@ -170,20 +169,20 @@ module Unix
       end
     end
 
-    def self.SetDesktopClientPID(pid) # (int64)
+    def SetDesktopClientPID(pid) # (int64)
       self.mu.Lock()
       defer self.mu.Unlock()
       self.pid = pid
     end
 
-    def self.DesktopClientPID # () -> int64
+    def DesktopClientPID # () -> int64
       self.mu.Lock()
       defer self.mu.Unlock()
 
       return self.pid
     end
 
-    def self.PrintAll # ()
+    def PrintAll # ()
       self.mu.Lock()
       defer self.mu.Unlock()
 

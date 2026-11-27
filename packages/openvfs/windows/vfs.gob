@@ -16,9 +16,9 @@ module Windows
   #
   # Currently plugins and modes are one-to-one but that's not required. The raw
   # integer values are used in Qml.
-  class Mode < uint8
+  var Mode = Class.new(uint8) do
     # String is Utility::enumToString(Vfs::Mode).
-    def String # () -> string
+    protected def String # () -> string
       case self
       when ModeOff
         return "off"
@@ -52,14 +52,12 @@ module Windows
     return ModeOff, false
   end
 
-  class ConvertToPlaceholderResult < uint8
-  end
+  var ConvertToPlaceholderResult = Class.new(uint8)
 
   const :ConvertToPlaceholderOk, 0
   const :ConvertToPlaceholderLocked, 1
 
-  class AvailabilityError < uint8
-  end
+  var AvailabilityError = Class.new(uint8)
 
   # AvailabilityErrorDbError means availability can't be retrieved due to db error.
   const :AvailabilityErrorDbError, 0
@@ -71,8 +69,7 @@ module Windows
   # not. Transpiled from src/libsync/common/pinstate.h.
   #
   # Note: This enum intentionally mimics CF_PIN_STATE of Windows cfapi.
-  class PinState < uint8
-  end
+  var PinState = Class.new(uint8)
 
   # PinInherited means the pin state is derived from the state of the parent
   # folder.
@@ -90,8 +87,7 @@ module Windows
   # VfsItemAvailability is a user-facing version of PinState.
   #
   # NOTE: The numerical values and ordering of this enum are relevant.
-  class VfsItemAvailability < uint8
-  end
+  var VfsItemAvailability = Class.new(uint8)
 
   # AvailabilityAlwaysLocal means the item and all its subitems are hydrated
   # and pinned AlwaysLocal.
@@ -124,8 +120,7 @@ module Windows
   end
 
   # ItemType is SyncFileItem::Type, as far as the vfs plugins read it.
-  class ItemType < uint8
-  end
+  var ItemType = Class.new(uint8)
 
   const :ItemTypeFile, 0
   const :ItemTypeFileMetadataOnly, 1
@@ -145,8 +140,7 @@ module Windows
   )
 
   # SyncFileStatusTag is SyncFileStatus::SyncFileStatusTag.
-  class SyncFileStatusTag < uint8
-  end
+  var SyncFileStatusTag = Class.new(uint8)
 
   const :StatusNone, 0
   const :StatusSync, 1
@@ -163,7 +157,7 @@ module Windows
   )
 
   # Account is the part of OCC::Account the cfapi plugin reads.
-  var Account = Interface.new do
+  module Account
     def UUID # () -> string
     end
 
@@ -173,13 +167,13 @@ module Windows
 
   # Journal is the part of OCC::SyncJournalDb the plugins reach through
   # VfsSetupParams.
-  var Journal = Interface.new do
+  module Journal
     def SetFileRecord(item) # (SyncFileItem) -> error
     end
   end
 
   # SyncEngine is the part of OCC::SyncEngine the cfapi rename callback reads.
-  var SyncEngine = Interface.new do
+  module SyncEngine
     def IsExcluded(path) # (string) -> bool
     end
   end
@@ -210,19 +204,19 @@ module Windows
     # Root is the sync folder's local root.
     attr_accessor :Root, string
 
-    def self.FolderDisplayName # () -> string
+    def FolderDisplayName # () -> string
       return self.FolderDisplayNameValue
     end
 
     # FilesystemPath is VfsSetupParams::filesystemPath().
-    def self.FilesystemPath # () -> string
+    def FilesystemPath # () -> string
       return self.Root
     end
   end
 
   # Vfs is the OCC::Vfs interface. The Qt signals become the Callbacks a plugin
   # is started with.
-  var Vfs = Interface.new do
+  module Vfs
     def Mode # () -> Mode
     end
 

@@ -94,8 +94,8 @@ module Unix
     attr_accessor :socketPath, string
 
     # done and timerDone replace std::thread::join().
-    attr_accessor :done, Chan[bool]
-    attr_accessor :timerDone, Chan[bool]
+    attr_accessor :done, Chan[Struct[]]
+    attr_accessor :timerDone, Chan[Struct[]]
 
     # connMu guards socket, which upstream holds in a std::atomic<int>.
     attr_accessor :connMu, sync.Mutex
@@ -108,11 +108,11 @@ module Unix
     attr_accessor :sharedMap, @@SharedMap
 
     # GetThreadName gets the thread name.
-    def self.GetThreadName # () -> string
+    def GetThreadName # () -> string
       return self.threadName
     end
 
-    def self.conn # () -> net.Conn
+    def conn # () -> net.Conn
       self.connMu.Lock()
       defer self.connMu.Unlock()
 
@@ -121,7 +121,7 @@ module Unix
 
     # dropConn closes the connection and marks the descriptor as gone, which is
     # upstream's `close(_socket); _socket = -1`.
-    def self.dropConn # ()
+    def dropConn # ()
       self.connMu.Lock()
       defer self.connMu.Unlock()
 
@@ -133,7 +133,7 @@ module Unix
 
     # CreateThread is called once to create the worker goroutine. It reports
     # whether the goroutine is created and the socket could be connected.
-    def self.CreateThread(socketPath) # (string) -> bool
+    def CreateThread(socketPath) # (string) -> bool
       self.mu.Lock()
 
       if self.running
@@ -145,8 +145,8 @@ module Unix
       self.exit = false
       self.timerExit = false
       self.socketPath = socketPath
-      self.done = make(Chan[bool])
-      self.timerDone = make(Chan[bool])
+      self.done = make(Chan[Struct[]])
+      self.timerDone = make(Chan[Struct[]])
       self.mu.Unlock()
 
       # Upstream synchronises on a promise so that the worker has entered
@@ -161,7 +161,7 @@ module Unix
     end
 
     # ExitThread is called once a program exit to exit the worker goroutine.
-    def self.ExitThread # ()
+    def ExitThread # ()
       self.mu.Lock()
 
       unless self.running
@@ -176,7 +176,7 @@ module Unix
       done = self.done
       self.mu.Unlock()
 
-      ~done
+      done.<<
 
       # Clear the queue if anything added while waiting for join
       self.mu.Lock()
@@ -189,7 +189,7 @@ module Unix
 
     # PostMsg adds a message to the thread queue. It returns false if the thread is
     # shutting down and the message was dropped.
-    def self.PostMsg(data) # (*MsgData) -> bool
+    def PostMsg(data) # (*MsgData) -> bool
       self.mu.Lock()
       defer self.mu.Unlock()
 
@@ -204,14 +204,14 @@ module Unix
     end
 
     # GetQueueSize gets the size of the thread message queue.
-    def self.GetQueueSize # () -> int
+    def GetQueueSize # () -> int
       self.mu.Lock()
       defer self.mu.Unlock()
 
       return len(self.queue)
     end
 
-    def self.initSocket # () -> bool
+    def initSocket # () -> bool
       if self.socketPath == ""
         # upstream asserts
         return false
@@ -233,7 +233,7 @@ module Unix
       return true
     end
 
-    def self.socketSendMsg(msgData) # (*MsgData) -> bool
+    def socketSendMsg(msgData) # (*MsgData) -> bool
       msg = msgData.Msg
 
       # prepare the OpenCloud message to be sent over the wire
@@ -276,7 +276,7 @@ module Unix
 
     # processSocketInput drains everything readable from the socket into rx and
     # dispatches every complete (newline terminated) message it contains.
-    def self.processSocketInput # ()
+    def processSocketInput # ()
       conn = self.conn()
 
       if conn == nil
@@ -338,7 +338,7 @@ module Unix
       pos = 0
 
       loop do
-        newpos = bytes.IndexByte(self.rx[pos...], '\n')
+        newpos = bytes.IndexByte(self.rx[pos...], "\\n")
 
         if newpos < 0
           break
@@ -361,7 +361,7 @@ module Unix
       end
     end
 
-    def self.handleReceivedMsg(msg) # (string)
+    def handleReceivedMsg(msg) # (string)
       if msg == ""
         return
       end
@@ -387,7 +387,7 @@ module Unix
           fmt.Fprintln(os.Stderr, "Invalid JSON message: " + msgAttr + reason)
         }
 
-        if (err = json.Unmarshal(Array[byte].new(msgAttr), @j))
+        if (err = json.Unmarshal(Array[byte].(msgAttr), @j))
           invalid(err.Error())
           return
         end
@@ -454,7 +454,7 @@ module Unix
     end
 
     # timerThread is the entry point for the timer goroutine.
-    def self.timerThread # ()
+    def timerThread # ()
       defer close(self.timerDone)
 
       loop do
@@ -478,7 +478,7 @@ module Unix
     end
 
     # process is the entry point for the worker goroutine.
-    def self.process # ()
+    def process # ()
       defer close(self.done)
 
       self.mu.Lock()
@@ -536,7 +536,7 @@ module Unix
           self.mu.Lock()
           self.timerExit = true
           self.mu.Unlock()
-          ~self.timerDone
+          self.timerDone.<<
 
           return
         end

@@ -33,7 +33,7 @@ module Windows
   # asynchronous because GetFolderFromPathAsync is; the callback contract is kept
   # so that the caller in startImpl() stays a literal translation, and it runs on
   # a goroutine for the same reason.
-  def RegisterSyncRoot(params, callback) # SetupParams, func(errorMessage string) -> ()
+  def RegisterSyncRoot(params, callback) # SetupParams, func(errorMessage string)
     go lambda {
       callback(registerSyncRootSync(params))
     }.()
@@ -136,7 +136,7 @@ module Windows
 
     while i < len(path)
       if path[i] == '/'
-        out = append(out, '\\')
+        out = append(out, "\\\\")
       else
         out = append(out, path[i])
       end
