@@ -4,7 +4,6 @@
 require "database/sql"
 require "os"
 require "path/filepath"
-require "strings"
 
 require "modernc.org/sqlite", _
 
@@ -13,19 +12,44 @@ module Journal
     "ON CONFLICT(path) DO UPDATE SET inode = excluded.inode, " +
     "local_mtime = excluded.local_mtime, local_size = excluded.local_size"
 
-  RECORD_REMOTE_QUERY = "INSERT INTO files (path, is_dir, remote_etag, remote_fileid, remote_size) VALUES (?, ?, ?, ?, ?) " +
+  RECORD_LOCAL_DIR_QUERY = "INSERT INTO files (path, is_dir, inode, local_mtime, local_size) VALUES (?, 1, ?, ?, ?) " +
+    "ON CONFLICT(path) DO UPDATE SET is_dir = 1, inode = excluded.inode, " +
+    "local_mtime = excluded.local_mtime, local_size = excluded.local_size"
+
+  RECORD_REMOTE_QUERY = "INSERT INTO files (path, is_dir, remote_etag, remote_fileid, remote_size, remote_seen) VALUES (?, ?, ?, ?, ?, ?) " +
     "ON CONFLICT(path) DO UPDATE SET is_dir = excluded.is_dir, remote_etag = excluded.remote_etag, " +
-    "remote_fileid = excluded.remote_fileid, remote_size = excluded.remote_size"
+    "remote_fileid = excluded.remote_fileid, remote_size = excluded.remote_size, remote_seen = excluded.remote_seen"
 
   SET_STATE_QUERY = "UPDATE files SET state = ?, pin_state = ? WHERE path = ?"
 
-  GET_FILE_QUERY = "SELECT path, COALESCE(is_dir,0), COALESCE(inode,0), COALESCE(local_mtime,0), COALESCE(local_size,0), COALESCE(remote_etag,''), COALESCE(remote_fileid,''), COALESCE(remote_size,0), COALESCE(state,0), COALESCE(pin_state,0) FROM files WHERE path = ?"
+  SET_SYNCED_QUERY = "UPDATE files SET state = ?, pin_state = ?, dirty = 0, sync_error = '', " +
+    "last_synced_etag = ?, last_synced_fileid = ?, last_synced_size = ?, last_synced_local_mtime = ?, last_synced_local_size = ? WHERE path = ?"
 
-  ALL_FILES_QUERY = "SELECT path, COALESCE(is_dir,0), COALESCE(inode,0), COALESCE(local_mtime,0), COALESCE(local_size,0), COALESCE(remote_etag,''), COALESCE(remote_fileid,''), COALESCE(remote_size,0), COALESCE(state,0), COALESCE(pin_state,0) FROM files ORDER BY path"
+  SET_DIRTY_QUERY = "UPDATE files SET dirty = 1, sync_error = '' WHERE path = ?"
+
+  SET_ERROR_QUERY = "UPDATE files SET sync_error = ? WHERE path = ?"
+
+  GET_FILE_QUERY = "SELECT path, COALESCE(is_dir,0), COALESCE(inode,0), COALESCE(local_mtime,0), COALESCE(local_size,0), " +
+    "COALESCE(remote_etag,''), COALESCE(remote_fileid,''), COALESCE(remote_size,0), COALESCE(state,0), COALESCE(pin_state,0), " +
+    "COALESCE(dirty,0), COALESCE(sync_error,''), COALESCE(last_synced_etag,''), COALESCE(last_synced_fileid,''), " +
+    "COALESCE(last_synced_size,0), COALESCE(last_synced_local_mtime,0), COALESCE(last_synced_local_size,0), COALESCE(remote_seen,0) " +
+    "FROM files WHERE path = ?"
+
+  ALL_FILES_QUERY = "SELECT path, COALESCE(is_dir,0), COALESCE(inode,0), COALESCE(local_mtime,0), COALESCE(local_size,0), " +
+    "COALESCE(remote_etag,''), COALESCE(remote_fileid,''), COALESCE(remote_size,0), COALESCE(state,0), COALESCE(pin_state,0), " +
+    "COALESCE(dirty,0), COALESCE(sync_error,''), COALESCE(last_synced_etag,''), COALESCE(last_synced_fileid,''), " +
+    "COALESCE(last_synced_size,0), COALESCE(last_synced_local_mtime,0), COALESCE(last_synced_local_size,0), COALESCE(remote_seen,0) " +
+    "FROM files ORDER BY path"
 
   PATH_BY_INODE_QUERY = "SELECT path FROM files WHERE inode = ? AND inode != 0 LIMIT 1"
 
   FORGET_FILE_QUERY = "DELETE FROM files WHERE path = ?"
+
+  REMOTE_UNSEEN_QUERY = "SELECT path, COALESCE(is_dir,0), COALESCE(inode,0), COALESCE(local_mtime,0), COALESCE(local_size,0), " +
+    "COALESCE(remote_etag,''), COALESCE(remote_fileid,''), COALESCE(remote_size,0), COALESCE(state,0), COALESCE(pin_state,0), " +
+    "COALESCE(dirty,0), COALESCE(sync_error,''), COALESCE(last_synced_etag,''), COALESCE(last_synced_fileid,''), " +
+    "COALESCE(last_synced_size,0), COALESCE(last_synced_local_mtime,0), COALESCE(last_synced_local_size,0), COALESCE(remote_seen,0) " +
+    "FROM files WHERE remote_seen != ? AND (remote_etag != '' OR remote_fileid != '' OR last_synced_etag != '' OR last_synced_fileid != '') ORDER BY path"
 
   var Entry = Struct.new(
     Path: string,
@@ -37,224 +61,331 @@ module Journal
     RemoteFileID: string,
     RemoteSize: int64,
     State: int,
-    PinState: int
+    PinState: int,
+    Dirty: bool,
+    SyncError: string,
+    LastSyncedEtag: string,
+    LastSyncedFileID: string,
+    LastSyncedSize: int64,
+    LastSyncedLocalMTime: int64,
+    LastSyncedLocalSize: int64,
+    RemoteSeen: int64
   )
 
   class Journal
     attr_accessor :db, @@sql.DB
-    attr_accessor :Files, @@Table
+    attr_accessor :files, @@Table
 
-    # Record stores local file knowledge, preserving remote fields.
-    def Record(path, inode, modtime, size) # (string, uint64, int64, int64) -> error
-      _, err = self.Files.Exec(RECORD_LOCAL_QUERY, path, inode, modtime, size)
-
+    # Record stores a local file observation.
+    def Record(path, inode, mtime, size) # (string, uint64, int64, int64) -> error
+      _, err = self.files.Exec(RECORD_LOCAL_QUERY, path, inode, mtime, size)
       return err
     end
 
-    # RecordRemote stores remote knowledge, preserving local fields.
-    def RecordRemote(path, isDir, etag, fileID, size) # (string, bool, string, string, int64) -> error
+    def RecordDir(path, inode, mtime) # (string, uint64, int64) -> error
+      _, err = self.files.Exec(RECORD_LOCAL_DIR_QUERY, path, inode, mtime, int64(0))
+      return err
+    end
+
+    # RecordRemote stores remote metadata observed during a remote scan.
+    def RecordRemote(path, etag, fileID, size, isDir, seenGen) # (string, string, string, int64, bool, int64) -> error
       dir = 0
       if isDir
         dir = 1
       end
 
-      _, err = self.Files.Exec(RECORD_REMOTE_QUERY, path, dir, etag, fileID, size)
-
+      _, err = self.files.Exec(RECORD_REMOTE_QUERY, path, dir, etag, fileID, size, seenGen)
       return err
     end
 
-    # SetState updates hydration/pin state for a known path.
+    # SetState updates the sync state and pin state for a path.
     def SetState(path, state, pinState) # (string, int, int) -> error
-      _, err = self.Files.Exec(SET_STATE_QUERY, state, pinState, path)
-
+      _, err = self.files.Exec(SET_STATE_QUERY, state, pinState, path)
       return err
     end
 
-    # Get returns the entry for path.
-    def Get(path) # (string) -> (Entry, bool)
+    # SetSynced marks a path as cleanly synced with the given facts.
+    def SetSynced(path, state, pinState, remoteEtag, remoteFileID, remoteSize, localMTime, localSize) # (string, int, int, string, string, int64, int64, int64) -> error
+      _, err = self.files.Exec(SET_SYNCED_QUERY, state, pinState, remoteEtag, remoteFileID, remoteSize, localMTime, localSize, path)
+      return err
+    end
+
+    def SetDirty(path) # (string) -> error
+      _, err = self.files.Exec(SET_DIRTY_QUERY, path)
+      return err
+    end
+
+    def SetError(path, msg) # (string, string) -> error
+      _, err = self.files.Exec(SET_ERROR_QUERY, msg, path)
+      return err
+    end
+
+    # Get returns the record for path. ok is false when the row does not exist.
+    def Get(path) # (string) -> (Entry, bool, error)
+      row = self.files.QueryRow(GET_FILE_QUERY, path)
+
       var :e, Entry
       var :isDir, int
+      var :dirty, int
 
-      err = self.Files.QueryRow(GET_FILE_QUERY, path).Scan(
-        @e.Path, @isDir, @e.Inode, @e.LocalMTime, @e.LocalSize,
-        @e.RemoteEtag, @e.RemoteFileID, @e.RemoteSize, @e.State, @e.PinState
-      )
+      err = row.Scan(@e.Path, @isDir, @e.Inode, @e.LocalMTime, @e.LocalSize, @e.RemoteEtag, @e.RemoteFileID, @e.RemoteSize, @e.State, @e.PinState, @dirty, @e.SyncError, @e.LastSyncedEtag, @e.LastSyncedFileID, @e.LastSyncedSize, @e.LastSyncedLocalMTime, @e.LastSyncedLocalSize, @e.RemoteSeen)
+      if err == sql.ErrNoRows
+        return Entry.new(), false, nil
+      end
+
       if err
-        return Entry.new(), false
+        return Entry.new(), false, err
       end
 
       e.IsDir = isDir != 0
-      return e, true
+      e.Dirty = dirty != 0
+      return e, true, nil
     end
 
-    # PathByInode returns the path last recorded for inode, which is how a
-    # rename is told apart from a delete and a create.
-    def PathByInode(inode) # (uint64) -> (string, bool)
-      var :path, string
+    # Entries returns all records ordered by path.
+    def Entries # () -> ([]Entry, error)
+      rows, err = self.files.Query(ALL_FILES_QUERY)
+      if err
+        return nil, err
+      end
 
-      if (err = self.Files.QueryRow(PATH_BY_INODE_QUERY, inode).Scan(@path))
+      defer rows.Close()
+
+      entries = Array[Entry].new
+
+      loop do
+        unless rows.Next()
+          break
+        end
+
+        var :e, Entry
+        var :isDir, int
+        var :dirty, int
+
+        if (err = rows.Scan(@e.Path, @isDir, @e.Inode, @e.LocalMTime, @e.LocalSize, @e.RemoteEtag, @e.RemoteFileID, @e.RemoteSize, @e.State, @e.PinState, @dirty, @e.SyncError, @e.LastSyncedEtag, @e.LastSyncedFileID, @e.LastSyncedSize, @e.LastSyncedLocalMTime, @e.LastSyncedLocalSize, @e.RemoteSeen))
+          return nil, err
+        end
+
+        e.IsDir = isDir != 0
+        e.Dirty = dirty != 0
+        entries = append(entries, e)
+      end
+
+      if (err = rows.Err())
+        return nil, err
+      end
+
+      return entries, nil
+    end
+
+    # Paths returns every path in the journal.
+    def Paths # () -> ([]string, error)
+      rows, err = self.files.Query("SELECT path FROM files ORDER BY path")
+      if err
+        return nil, err
+      end
+
+      defer rows.Close()
+
+      paths = Array[string].new
+
+      loop do
+        unless rows.Next()
+          break
+        end
+
+        var :p, string
+        if (err = rows.Scan(@p))
+          return nil, err
+        end
+
+        paths = append(paths, p)
+      end
+
+      if (err = rows.Err())
+        return nil, err
+      end
+
+      return paths, nil
+    end
+
+    # PathByInode returns the path of the file with the given inode. ok is false
+    # when no such row exists.
+    def PathByInode(inode) # (uint64) -> (string, bool)
+      row = self.files.QueryRow(PATH_BY_INODE_QUERY, inode)
+
+      var :path, string
+      err = row.Scan(@path)
+      if err != nil
         return "", false
       end
 
       return path, true
     end
 
-    # Forget drops path, which is no longer on disk.
+    # Forget removes the record for path.
     def Forget(path) # (string) -> error
-      _, err = self.Files.Exec(FORGET_FILE_QUERY, path)
-
+      _, err = self.files.Exec(FORGET_FILE_QUERY, path)
       return err
     end
 
-    # Paths returns every path currently recorded in the journal.
-    def Paths # () -> ([]string, error)
-      rows, err = self.Files.Query("SELECT path FROM files")
+    # RemoteUnseen returns entries that have remote identity but were not seen in scanGen.
+    def RemoteUnseen(scanGen) # (int64) -> ([]Entry, error)
+      rows, err = self.files.Query(REMOTE_UNSEEN_QUERY, scanGen)
       if err
         return nil, err
       end
 
       defer rows.Close()
 
-      var :paths, Array[string]
+      entries = Array[Entry].new
 
-      while rows.Next()
-        var :path, string
-
-        if (err = rows.Scan(@path))
-          return nil, err
+      loop do
+        unless rows.Next()
+          break
         end
 
-        paths = append(paths, path)
-      end
-
-      return paths, rows.Err()
-    end
-
-    # Entries returns every file currently recorded in the journal.
-    def Entries # () -> ([]Entry, error)
-      rows, err = self.Files.Query(ALL_FILES_QUERY)
-      if err
-        return nil, err
-      end
-
-      defer rows.Close()
-
-      var :entries, Array[Entry]
-
-      while rows.Next()
         var :e, Entry
         var :isDir, int
+        var :dirty, int
 
-        if (err = rows.Scan(@e.Path, @isDir, @e.Inode, @e.LocalMTime, @e.LocalSize, @e.RemoteEtag, @e.RemoteFileID, @e.RemoteSize, @e.State, @e.PinState))
+        if (err = rows.Scan(@e.Path, @isDir, @e.Inode, @e.LocalMTime, @e.LocalSize, @e.RemoteEtag, @e.RemoteFileID, @e.RemoteSize, @e.State, @e.PinState, @dirty, @e.SyncError, @e.LastSyncedEtag, @e.LastSyncedFileID, @e.LastSyncedSize, @e.LastSyncedLocalMTime, @e.LastSyncedLocalSize, @e.RemoteSeen))
           return nil, err
         end
 
         e.IsDir = isDir != 0
+        e.Dirty = dirty != 0
         entries = append(entries, e)
       end
 
-      return entries, rows.Err()
+      if (err = rows.Err())
+        return nil, err
+      end
+
+      return entries, nil
     end
 
+    # NextScanGen increments and returns a remote scan generation number.
+    def NextScanGen # () -> (int64, error)
+      _, err = self.db.Exec("INSERT INTO meta(key, value) VALUES('remote_scan_gen', '0') ON CONFLICT(key) DO NOTHING")
+      if err
+        return 0, err
+      end
+
+      _, err = self.db.Exec("UPDATE meta SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT) WHERE key = 'remote_scan_gen'")
+      if err
+        return 0, err
+      end
+
+      row = self.db.QueryRow("SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'remote_scan_gen'")
+      var :gen, int64
+      if (err = row.Scan(@gen))
+        return 0, err
+      end
+
+      return gen, nil
+    end
+
+    # Close closes the underlying database connection.
     def Close # () -> error
       return self.db.Close()
     end
   end
 
-  def tableExists(db, name) # (*sql.DB, string) -> bool
-    var :n, string
-    err = db.QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name=?", name).Scan(@n)
-    return err == nil
-  end
-
-  def migration001(db) # (*sql.DB) -> error
-    if tableExists(db, "files")
-      return nil
-    end
-
-    _, err = db.Exec("CREATE TABLE files (" +
-      "path TEXT PRIMARY KEY, " +
-      "is_dir INTEGER NOT NULL DEFAULT 0, " +
-      "inode INTEGER NOT NULL DEFAULT 0, " +
-      "local_mtime INTEGER NOT NULL DEFAULT 0, " +
-      "local_size INTEGER NOT NULL DEFAULT 0, " +
-      "remote_etag TEXT NOT NULL DEFAULT '', " +
-      "remote_fileid TEXT NOT NULL DEFAULT '', " +
-      "remote_size INTEGER NOT NULL DEFAULT 0, " +
-      "state INTEGER NOT NULL DEFAULT 0, " +
-      "pin_state INTEGER NOT NULL DEFAULT 0)")
-    if err
-      return err
-    end
-
-    _, err = db.Exec("CREATE INDEX IF NOT EXISTS files_inode ON files (inode)")
-    return err
-  end
-
-  def migration002(db) # (*sql.DB) -> error
-    columns = Array[Array[string]].new(
-      Array[string].new("is_dir", "INTEGER NOT NULL DEFAULT 0"),
-      Array[string].new("inode", "INTEGER NOT NULL DEFAULT 0"),
-      Array[string].new("local_mtime", "INTEGER NOT NULL DEFAULT 0"),
-      Array[string].new("local_size", "INTEGER NOT NULL DEFAULT 0"),
-      Array[string].new("remote_etag", "TEXT NOT NULL DEFAULT ''"),
-      Array[string].new("remote_fileid", "TEXT NOT NULL DEFAULT ''"),
-      Array[string].new("remote_size", "INTEGER NOT NULL DEFAULT 0"),
-      Array[string].new("state", "INTEGER NOT NULL DEFAULT 0"),
-      Array[string].new("pin_state", "INTEGER NOT NULL DEFAULT 0")
-    )
-
-    columns.each do |_, col|
-      _, err = db.Exec("ALTER TABLE files ADD COLUMN " + col[0] + " " + col[1])
-      if err != nil && strings.Contains(err.Error(), "duplicate column name")
-        next
-      end
-
-      if err
-        return err
-      end
-    end
-
-    _, _ = db.Exec("UPDATE files SET is_dir=COALESCE(is_dir,0), inode=COALESCE(inode,0), local_mtime=COALESCE(local_mtime,0), local_size=COALESCE(local_size,0), remote_etag=COALESCE(remote_etag,''), remote_fileid=COALESCE(remote_fileid,''), remote_size=COALESCE(remote_size,0), state=COALESCE(state,0), pin_state=COALESCE(pin_state,0)")
-
-    return nil
-  end
-
-  def runMigrations(db) # (*sql.DB) -> error
-    if (err = migration001(db))
-      return err
-    end
-
-    if (err = migration002(db))
-      return err
-    end
-
-    return nil
-  end
-
-  # Open opens the journal at path, creating the file and its tables if they are
-  # not there yet.
+  # Open opens (or creates) the journal database at path.
   def Open(path) # (string) -> (*Journal, error)
     if (err = os.MkdirAll(filepath.Dir(path), 0755))
       return nil, err
     end
 
-    dsn = "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)"
-
-    db, err = sql.Open("sqlite", dsn)
+    db, err = sql.Open("sqlite", path)
     if err
       return nil, err
     end
 
-    db.SetMaxOpenConns(1)
-
-    if (err = runMigrations(db))
-      _ = db.Close()
+    if (err = db.Ping())
+      db.Close()
       return nil, err
     end
 
-    files = @Table.new(db: db, name: "files", createSQL: "")
+    _, err = db.Exec("PRAGMA busy_timeout = 5000")
+    if err
+      db.Close()
+      return nil, err
+    end
 
-    return @Journal.new(db: db, Files: files), nil
+    _, err = db.Exec("PRAGMA journal_mode = WAL")
+    if err
+      db.Close()
+      return nil, err
+    end
+
+    _, err = db.Exec("PRAGMA synchronous = NORMAL")
+    if err
+      db.Close()
+      return nil, err
+    end
+
+    _, err = db.Exec("PRAGMA foreign_keys = ON")
+    if err
+      db.Close()
+      return nil, err
+    end
+
+    files = @Table.new(
+      db: db,
+      name: "files",
+      createSQL: "CREATE TABLE IF NOT EXISTS files (\n  path TEXT PRIMARY KEY,\n  is_dir INTEGER NOT NULL DEFAULT 0,\n  inode INTEGER,\n  local_mtime INTEGER,\n  local_size INTEGER,\n  remote_etag TEXT,\n  remote_fileid TEXT,\n  remote_size INTEGER,\n  state INTEGER NOT NULL DEFAULT 0,\n  pin_state INTEGER NOT NULL DEFAULT 0\n)"
+    )
+
+    if (err = files.Create())
+      db.Close()
+      return nil, err
+    end
+
+    meta = @Table.new(
+      db: db,
+      name: "meta",
+      createSQL: "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+    )
+
+    if (err = meta.Create())
+      db.Close()
+      return nil, err
+    end
+
+    # Add columns if they don't exist (migrations).
+    Array[string].new(
+      "ALTER TABLE files ADD COLUMN is_dir INTEGER NOT NULL DEFAULT 0",
+      "ALTER TABLE files ADD COLUMN remote_etag TEXT",
+      "ALTER TABLE files ADD COLUMN remote_fileid TEXT",
+      "ALTER TABLE files ADD COLUMN remote_size INTEGER",
+      "ALTER TABLE files ADD COLUMN state INTEGER NOT NULL DEFAULT 0",
+      "ALTER TABLE files ADD COLUMN pin_state INTEGER NOT NULL DEFAULT 0",
+      "ALTER TABLE files ADD COLUMN dirty INTEGER NOT NULL DEFAULT 0",
+      "ALTER TABLE files ADD COLUMN sync_error TEXT NOT NULL DEFAULT ''",
+      "ALTER TABLE files ADD COLUMN last_synced_etag TEXT NOT NULL DEFAULT ''",
+      "ALTER TABLE files ADD COLUMN last_synced_fileid TEXT NOT NULL DEFAULT ''",
+      "ALTER TABLE files ADD COLUMN last_synced_size INTEGER NOT NULL DEFAULT 0",
+      "ALTER TABLE files ADD COLUMN last_synced_local_mtime INTEGER NOT NULL DEFAULT 0",
+      "ALTER TABLE files ADD COLUMN last_synced_local_size INTEGER NOT NULL DEFAULT 0",
+      "ALTER TABLE files ADD COLUMN remote_seen INTEGER NOT NULL DEFAULT 0"
+    ).each do |_, stmt|
+      _, _ = db.Exec(stmt)
+    end
+
+    _, err = db.Exec("CREATE INDEX IF NOT EXISTS idx_files_inode ON files(inode)")
+    if err
+      db.Close()
+      return nil, err
+    end
+
+    _, err = db.Exec("CREATE INDEX IF NOT EXISTS idx_files_remote_seen ON files(remote_seen)")
+    if err
+      db.Close()
+      return nil, err
+    end
+
+    return @Journal.new(db: db, files: files), nil
   end
 end

@@ -16,6 +16,11 @@ module Directory
       return self.root
     end
 
+    # Ignored reports whether rel is excluded by the scanner's ignore rule.
+    def Ignored(rel) # (string) -> bool
+      return self.ignored != nil && self.ignored(rel)
+    end
+
     def Apply(event) # (Event)
       log.Info().Str("kind", event.Kind.String()).Str("path", event.Path).Msg("change")
 

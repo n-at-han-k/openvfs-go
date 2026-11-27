@@ -1,26 +1,82 @@
 require "context"
+require "fmt"
+require "io/fs"
 require "os"
 require "path/filepath"
+require "sort"
+require "strings"
+require "time"
 
 require "example.com/project/src/directory"
 require "example.com/project/src/journal"
 require "example.com/project/src/remote"
 require "example.com/project/src/vfs"
-require "github.com/migadu/go-webdav"
 require "github.com/rs/zerolog/log"
 
 module Main
   var SyncRequest = Struct.new(Cause: directory.Event)
 
-  var syncPhase = Struct.new(
-    Name: string,
-    Run: Proc[context.Context, [error]]
+  var SyncOp = Class.new(uint8) do
+    protected def String # () -> string
+      case self
+      when OpNone
+        return "None"
+      when OpDownloadPlaceholder
+        return "DownloadPlaceholder"
+      when OpDownloadContent
+        return "DownloadContent"
+      when OpUpload
+        return "Upload"
+      when OpMkdirRemote
+        return "MkdirRemote"
+      when OpMkdirLocal
+        return "MkdirLocal"
+      when OpDeleteRemote
+        return "DeleteRemote"
+      when OpDeleteLocal
+        return "DeleteLocal"
+      when OpMoveRemote
+        return "MoveRemote"
+      when OpMoveLocal
+        return "MoveLocal"
+      when OpConflict
+        return "Conflict"
+      when OpUpdateMetadata
+        return "UpdateMetadata"
+      end
+
+      return "Unknown"
+    end
+  end
+
+  const :OpNone, 0
+  const :OpDownloadPlaceholder, 1
+  const :OpDownloadContent, 2
+  const :OpUpload, 3
+  const :OpMkdirRemote, 4
+  const :OpMkdirLocal, 5
+  const :OpDeleteRemote, 6
+  const :OpDeleteLocal, 7
+  const :OpMoveRemote, 8
+  const :OpMoveLocal, 9
+  const :OpConflict, 10
+  const :OpUpdateMetadata, 11
+
+  var SyncAction = Struct.new(
+    Op: SyncOp,
+    Path: string,
+    From: string,
+    Entry: journal.Entry
   )
 
   class Syncer
+    attr_accessor :mountpoint, string
     attr_accessor :scanner, @@directory.Scanner
     attr_accessor :remote, @@remote.Scanner
     attr_accessor :journal, @@journal.Journal
+    attr_accessor :client, @@remote.Client
+    attr_accessor :downloader, @@remote.Downloader
+    attr_accessor :uploader, @@remote.Uploader
     attr_accessor :requests, Chan[SyncRequest]
 
     def Request(req) # (SyncRequest) -> bool
@@ -43,89 +99,541 @@ module Main
       end
     end
 
-    def phases # () -> []syncPhase
-      return Array[syncPhase].new(
-        syncPhase.new(Name: "discover local", Run: self.discoverLocal),
-        syncPhase.new(Name: "discover remote", Run: self.discoverRemote),
-        syncPhase.new(Name: "reconcile", Run: self.reconcile),
-        syncPhase.new(Name: "propagate", Run: self.propagate)
-      )
-    end
-
     def sync(ctx, req) # (context.Context, SyncRequest)
-      log.Info().Str("cause", req.Cause.Kind.String()).Msg("sync")
+      log.Info().Str("cause", req.Cause.Kind.String()).Str("path", req.Cause.Path).Msg("sync")
 
-      self.phases().each do |_, phase|
-        if (err = phase.Run(ctx))
-          log.Warn().Err(err).Str("phase", phase.Name).Msg("sync")
-          return
-        end
-
-        log.Debug().Str("phase", phase.Name).Msg("sync")
+      scanGen, err = self.journal.NextScanGen()
+      if err
+        log.Warn().Err(err).Msg("sync: scan gen")
+        return
       end
+
+      if (err = self.discoverLocal(ctx))
+        log.Warn().Err(err).Msg("sync: discover local")
+        return
+      end
+
+      if (err = self.discoverRemote(ctx, scanGen))
+        log.Warn().Err(err).Msg("sync: discover remote")
+        return
+      end
+
+      actions, err = self.reconcile(ctx, scanGen)
+      if err
+        log.Warn().Err(err).Msg("sync: reconcile")
+        return
+      end
+
+      if (err = self.propagate(ctx, actions))
+        log.Warn().Err(err).Msg("sync: propagate")
+        return
+      end
+
+      log.Debug().Int("actions", len(actions)).Msg("sync: done")
     end
 
     def discoverLocal(ctx) # (context.Context) -> error
-      return self.scanner.Scan(nil)
-    end
+      seen = make(Hash[string, bool])
 
-    def discoverRemote(ctx) # (context.Context) -> error
-      if self.remote == nil
+      err = filepath.WalkDir(self.mountpoint, lambda { |p, d, err| # (string, fs.DirEntry, error) -> error
+        if err
+          if os.IsNotExist(err)
+            return nil
+          end
+
+          return err
+        end
+
+        rel, relErr = filepath.Rel(self.mountpoint, p)
+        if relErr != nil
+          return relErr
+        end
+
+        rel = filepath.ToSlash(rel)
+        if rel == "."
+          return nil
+        end
+
+        if self.shouldIgnore(rel)
+          if d.IsDir()
+            return filepath.SkipDir
+          end
+
+          return nil
+        end
+
+        info, infoErr = d.Info()
+        if infoErr != nil
+          if os.IsNotExist(infoErr)
+            return nil
+          end
+
+          return infoErr
+        end
+
+        seen[rel] = true
+        inode = directory.InodeOf(info)
+
+        if d.IsDir()
+          _ = self.journal.RecordDir(rel, inode, info.ModTime().Unix())
+          return nil
+        end
+
+        existing, ok, getErr = self.journal.Get(rel)
+        if getErr != nil
+          return getErr
+        end
+
+        # Detect local changes for synced files.
+        if ok && !existing.IsDir
+          if self.isLocalDirty(rel, p, existing, info)
+            _ = self.journal.SetDirty(rel)
+          end
+        end
+
+        _ = self.journal.Record(rel, inode, info.ModTime().Unix(), info.Size())
         return nil
+      })
+      if err
+        return err
       end
 
-      return self.remote.Scan(ctx, "", lambda { |path, entry| # (string, webdav.FileInfo)
-        if (err = self.journal.RecordRemote(path, entry.IsDir, entry.ETag, "", entry.Size))
-          log.Warn().Err(err).Str("path", path).Msg("remote record")
-        end
-      })
-    end
-
-    def reconcile(ctx) # (context.Context) -> error
-      return nil
-    end
-
-    def propagate(ctx) # (context.Context) -> error
+      # Forget local-only entries that disappeared locally and have no remote identity.
       entries, err = self.journal.Entries()
       if err
         return err
       end
 
-      entries.each do |_, entry|
-        if entry.Path == "" || entry.Path == "."
+      entries.each do |_, e|
+        if (_, ok = seen[e.Path])
           next
         end
 
-        remoteBacked = entry.IsDir || entry.RemoteEtag != "" || entry.RemoteFileID != "" || entry.RemoteSize != 0
-        unless remoteBacked
+        if e.RemoteEtag != "" || e.RemoteFileID != "" || e.LastSyncedEtag != "" || e.LastSyncedFileID != ""
+          # Keep; reconcile will handle remote/local deletion.
           next
         end
 
-        full = filepath.Join(self.scanner.Root(), entry.Path)
+        _ = self.journal.Forget(e.Path)
+      end
 
-        if entry.IsDir
-          if (err = os.MkdirAll(full, 0755))
-            log.Warn().Err(err).Str("path", entry.Path).Msg("placeholder dir")
+      return nil
+    end
+
+    def discoverRemote(ctx, scanGen) # (context.Context, int64) -> error
+      if self.remote == nil
+        return nil
+      end
+
+      return self.remote.Scan(ctx, "", lambda { |path, entry| # (string, remote.Entry)
+        p = strings.TrimLeft(path, "/")
+        p = filepath.ToSlash(p)
+        if p == "." || p == ""
+          return
+        end
+
+        _ = self.journal.RecordRemote(p, entry.ETag, entry.FileID, entry.Size, entry.IsDir, scanGen)
+      })
+    end
+
+    def reconcile(ctx, scanGen) # (context.Context, int64) -> ([]SyncAction, error)
+      entries, err = self.journal.Entries()
+      if err
+        return nil, err
+      end
+
+      actions = Array[SyncAction].new
+      seenRemoteMove = make(Hash[string, bool])
+
+      # Index by remote fileid for move detection.
+      byFileID = make(Hash[string, journal.Entry])
+      entries.each do |_, e|
+        if e.RemoteFileID != ""
+          byFileID[e.RemoteFileID] = e
+        end
+      end
+
+      entries.each do |_, e|
+        if e.Path == ""
+          next
+        end
+
+        localExists = self.localExists(e.Path)
+        remoteSeen = e.RemoteSeen == scanGen
+        hasRemote = e.RemoteEtag != "" || e.RemoteFileID != "" || remoteSeen
+        hadRemote = e.LastSyncedEtag != "" || e.LastSyncedFileID != "" || e.RemoteEtag != "" || e.RemoteFileID != ""
+        localDirty = e.Dirty
+
+        # Remote deleted
+        if hadRemote && !remoteSeen
+          if localExists && localDirty
+            actions = append(actions, SyncAction.new(Op: OpConflict, Path: e.Path, Entry: e))
+          elsif localExists
+            actions = append(actions, SyncAction.new(Op: OpDeleteLocal, Path: e.Path, Entry: e))
+          else
+            _ = self.journal.Forget(e.Path)
+          end
+          next
+        end
+
+        # Remote exists
+        if remoteSeen
+          if e.IsDir
+            if !localExists
+              actions = append(actions, SyncAction.new(Op: OpMkdirLocal, Path: e.Path, Entry: e))
+            end
+            next
           end
 
+          if !localExists
+            actions = append(actions, SyncAction.new(Op: OpDownloadPlaceholder, Path: e.Path, Entry: e))
+            next
+          end
+
+          remoteChanged = self.remoteChanged(e)
+          if remoteChanged
+            if localDirty
+              actions = append(actions, SyncAction.new(Op: OpConflict, Path: e.Path, Entry: e))
+            else
+              attr, ok = vfs.RemoteFileInfoFromAttributes(filepath.Join(self.mountpoint, e.Path))
+              if ok && attr.IsOK() && attr.State == vfs.StateHydrated
+                actions = append(actions, SyncAction.new(Op: OpDownloadContent, Path: e.Path, Entry: e))
+              else
+                actions = append(actions, SyncAction.new(Op: OpDownloadPlaceholder, Path: e.Path, Entry: e))
+              end
+            end
+            next
+          end
+        end
+
+        # Local exists, no remote currently known but maybe local new/dirty
+        if localExists && !remoteSeen
+          if e.IsDir
+            if hadRemote
+              # local dir kept but remote gone handled above; if not seen, maybe new local dir
+            else
+              actions = append(actions, SyncAction.new(Op: OpMkdirRemote, Path: e.Path, Entry: e))
+            end
+            next
+          end
+
+          if !hadRemote
+            actions = append(actions, SyncAction.new(Op: OpUpload, Path: e.Path, Entry: e))
+            next
+          end
+
+          if localDirty
+            # Remote gone but local dirty handled above; local dirty and remote exists handled by conflict; here remote missing.
+            actions = append(actions, SyncAction.new(Op: OpConflict, Path: e.Path, Entry: e))
+            next
+          end
+        end
+
+        # Local dirty and remote same - upload
+        if localExists && remoteSeen && localDirty && !e.IsDir
+          actions = append(actions, SyncAction.new(Op: OpUpload, Path: e.Path, Entry: e))
           next
         end
 
-        if (err = vfs.WriteDehydratedPlaceholder(full, entry.RemoteEtag, entry.RemoteFileID, entry.RemoteSize))
-          log.Warn().Err(err).Str("path", entry.Path).Msg("placeholder file")
+        _ = hasRemote
+        _ = seenRemoteMove
+      end
+
+      actions = self.sortActions(actions)
+      return actions, nil
+    end
+
+    def propagate(ctx, actions) # (context.Context, []SyncAction) -> error
+      actions.each do |_, a|
+        if ctx.Err() != nil
+          return ctx.Err()
+        end
+
+        log.Info().Str("op", a.Op.String()).Str("path", a.Path).Msg("sync action")
+
+        var :err, error
+        case a.Op
+        when OpMkdirLocal
+          err = self.doMkdirLocal(a)
+        when OpDownloadPlaceholder
+          err = self.doDownloadPlaceholder(a)
+        when OpDownloadContent
+          err = self.doDownloadContent(ctx, a)
+        when OpDeleteLocal
+          err = self.doDeleteLocal(a)
+        when OpMkdirRemote
+          err = self.doMkdirRemote(ctx, a)
+        when OpUpload
+          err = self.doUpload(ctx, a)
+        when OpDeleteRemote
+          err = self.doDeleteRemote(ctx, a)
+        when OpConflict
+          err = self.doConflict(a)
+        when OpUpdateMetadata
+          err = self.doUpdateMetadata(a)
+        else
+          err = nil
+        end
+
+        if err
+          _ = self.journal.SetError(a.Path, err.Error())
+          log.Warn().Err(err).Str("op", a.Op.String()).Str("path", a.Path).Msg("sync propagate")
         end
       end
 
       return nil
     end
+
+    def doMkdirLocal(a) # (SyncAction) -> error
+      p = filepath.Join(self.mountpoint, a.Path)
+      if (err = os.MkdirAll(p, 0755))
+        return err
+      end
+
+      st, err = os.Stat(p)
+      if err == nil
+        _ = self.journal.RecordDir(a.Path, directory.InodeOf(st), st.ModTime().Unix())
+      end
+      _ = self.journal.SetSynced(a.Path, vfs.StateHydrated, vfs.PinInherited, a.Entry.RemoteEtag, a.Entry.RemoteFileID, a.Entry.RemoteSize, int64(0), int64(0))
+      return nil
+    end
+
+    def doDownloadPlaceholder(a) # (SyncAction) -> error
+      p = filepath.Join(self.mountpoint, a.Path)
+      if (err = vfs.WriteDehydratedPlaceholder(p, a.Entry.RemoteEtag, a.Entry.RemoteFileID, a.Entry.RemoteSize))
+        return err
+      end
+
+      st, err = os.Stat(p)
+      if err == nil
+        _ = self.journal.Record(a.Path, directory.InodeOf(st), st.ModTime().Unix(), st.Size())
+      end
+      _ = self.journal.SetSynced(a.Path, vfs.StateDeHydrated, vfs.PinInherited, a.Entry.RemoteEtag, a.Entry.RemoteFileID, a.Entry.RemoteSize, int64(0), int64(0))
+      return nil
+    end
+
+    def doDownloadContent(ctx, a) # (context.Context, SyncAction) -> error
+      p = filepath.Join(self.mountpoint, a.Path)
+      event = vfs.MountEvent.new(
+        Kind: vfs.Hydrate,
+        Path: p,
+        FileID: a.Entry.RemoteFileID,
+        Caller: nil,
+        Reply: make(Chan[bool], 1)
+      )
+
+      # Direct download via downloader path: enqueue synthetic event.
+      if self.downloader == nil
+        return fmt.Errorf("no downloader")
+      end
+
+      self.downloader.Enqueue(ctx, event)
+      case
+      when ok = ←.event.Reply
+        if !ok
+          return fmt.Errorf("download failed")
+        end
+      when ←.ctx.Done()
+        return ctx.Err()
+      end
+
+      st, err = os.Stat(p)
+      if err == nil
+        _ = self.journal.SetSynced(a.Path, vfs.StateHydrated, vfs.PinInherited, a.Entry.RemoteEtag, a.Entry.RemoteFileID, a.Entry.RemoteSize, st.ModTime().Unix(), st.Size())
+      end
+      return nil
+    end
+
+    def doDeleteLocal(a) # (SyncAction) -> error
+      p = filepath.Join(self.mountpoint, a.Path)
+      err = os.RemoveAll(p)
+      if err != nil && !os.IsNotExist(err)
+        return err
+      end
+
+      _ = self.journal.Forget(a.Path)
+      return nil
+    end
+
+    def doMkdirRemote(ctx, a) # (context.Context, SyncAction) -> error
+      if self.client == nil
+        return fmt.Errorf("no remote client")
+      end
+
+      if (err = self.client.Mkdir(ctx, a.Path))
+        # ignore already exists? webdav may error; try stat
+        _, statErr = self.client.Stat(ctx, a.Path)
+        if statErr != nil
+          return err
+        end
+      end
+
+      st, _ = os.Stat(filepath.Join(self.mountpoint, a.Path))
+      mtime = int64(0)
+      size = int64(0)
+      if st != nil
+        mtime = st.ModTime().Unix()
+        size = st.Size()
+      end
+
+      entry, statErr = self.client.Stat(ctx, a.Path)
+      if statErr == nil
+        _ = self.journal.RecordRemote(a.Path, entry.ETag, entry.FileID, entry.Size, true, a.Entry.RemoteSeen)
+        _ = self.journal.SetSynced(a.Path, vfs.StateHydrated, vfs.PinInherited, entry.ETag, entry.FileID, entry.Size, mtime, size)
+      else
+        _ = self.journal.SetSynced(a.Path, vfs.StateHydrated, vfs.PinInherited, "", "", int64(0), mtime, size)
+      end
+      return nil
+    end
+
+    def doUpload(ctx, a) # (context.Context, SyncAction) -> error
+      if self.uploader == nil
+        return fmt.Errorf("no uploader")
+      end
+
+      return self.uploader.UploadNow(ctx, a.Path)
+    end
+
+    def doDeleteRemote(ctx, a) # (context.Context, SyncAction) -> error
+      if self.client == nil
+        return fmt.Errorf("no remote client")
+      end
+
+      if (err = self.client.RemoveAll(ctx, a.Path))
+        return err
+      end
+
+      _ = self.journal.Forget(a.Path)
+      return nil
+    end
+
+    def doConflict(a) # (SyncAction) -> error
+      p = filepath.Join(self.mountpoint, a.Path)
+      _, serr = os.Stat(p)
+      if os.IsNotExist(serr)
+        _ = self.journal.SetError(a.Path, "conflict: local missing")
+        return nil
+      end
+
+      ext = filepath.Ext(a.Path)
+      base = strings.TrimSuffix(a.Path, ext)
+      conflict = fmt.Sprintf("%s (conflict %s)%s", base, time.Now().UTC().Format("20060102-150405"), ext)
+      cp = filepath.Join(self.mountpoint, conflict)
+
+      if (err = os.Rename(p, cp))
+        return err
+      end
+
+      _ = self.journal.Forget(a.Path)
+      st, err = os.Stat(cp)
+      if err == nil
+        _ = self.journal.Record(conflict, directory.InodeOf(st), st.ModTime().Unix(), st.Size())
+        _ = self.journal.SetDirty(conflict)
+      end
+
+      # Recreate remote version as placeholder/content on next reconcile.
+      return nil
+    end
+
+    def doUpdateMetadata(a) # (SyncAction) -> error
+      _ = self.journal.SetSynced(a.Path, a.Entry.State, a.Entry.PinState, a.Entry.RemoteEtag, a.Entry.RemoteFileID, a.Entry.RemoteSize, a.Entry.LocalMTime, a.Entry.LocalSize)
+      return nil
+    end
+
+    def localExists(rel) # (string) -> bool
+      _, err = os.Stat(filepath.Join(self.mountpoint, rel))
+      return err == nil
+    end
+
+    def remoteChanged(e) # (journal.Entry) -> bool
+      if e.LastSyncedEtag == "" && e.LastSyncedFileID == ""
+        # never synced, but has remote; treat as remote authoritative if remote seen
+        return false
+      end
+
+      if e.RemoteEtag != "" && e.LastSyncedEtag != "" && e.RemoteEtag != e.LastSyncedEtag
+        return true
+      end
+
+      if e.RemoteFileID != "" && e.LastSyncedFileID != "" && e.RemoteFileID != e.LastSyncedFileID
+        return true
+      end
+
+      if e.RemoteSize != e.LastSyncedSize && e.LastSyncedEtag != ""
+        return true
+      end
+
+      return false
+    end
+
+    def isLocalDirty(rel, abs, e, info) # (string, string, journal.Entry, os.FileInfo) -> bool
+      if e.LastSyncedEtag == "" && e.LastSyncedFileID == "" && e.RemoteEtag == "" && e.RemoteFileID == ""
+        return true
+      end
+
+      # Dehydrated placeholders are not local dirty edits.
+      attr, ok = vfs.RemoteFileInfoFromAttributes(abs)
+      if ok && attr.IsOK() && attr.State == vfs.StateDeHydrated
+        return false
+      end
+
+      if e.LastSyncedLocalMTime != 0 && info.ModTime().Unix() != e.LastSyncedLocalMTime
+        return true
+      end
+
+      if e.LastSyncedLocalSize != 0 && info.Size() != e.LastSyncedLocalSize
+        return true
+      end
+
+      if e.Dirty
+        return true
+      end
+
+      # If we have no synced baseline, but it's a real hydrated file, be conservative.
+      if e.LastSyncedLocalMTime == 0 && e.LastSyncedLocalSize == 0 && ok && attr.IsOK() && attr.State == vfs.StateHydrated
+        return false
+      end
+
+      return false
+    end
+
+    def shouldIgnore(rel) # (string) -> bool
+      base = filepath.Base(rel)
+      if strings.HasPrefix(base, ".openvfs-download-") || strings.HasPrefix(base, ".openvfs-upload-")
+        return true
+      end
+
+      if self.scanner != nil && self.scanner.Ignored(rel)
+        return true
+      end
+
+      return false
+    end
+
+    def sortActions(actions) # ([]SyncAction) -> []SyncAction
+      sort.Slice(actions, lambda { |i, j| # (int, int) -> bool
+        ai = actions[i]
+        aj = actions[j]
+        if ai.Op != aj.Op
+          return ai.Op < aj.Op
+        end
+        return ai.Path < aj.Path
+      })
+
+      return actions
+    end
   end
 
-  def NewSyncer(scanner, journal, remoteScanner) # (*directory.Scanner, *journal.Journal, *remote.Scanner) -> *Syncer
+  def NewSyncer(scanner, journal, remoteScanner, client, mountpoint, downloader, uploader) # (*directory.Scanner, *journal.Journal, *remote.Scanner, *remote.Client, string, *remote.Downloader, *remote.Uploader) -> *Syncer
     return @Syncer.new(
+      mountpoint: mountpoint,
       scanner: scanner,
-      journal: journal,
       remote: remoteScanner,
-      requests: make(Chan[SyncRequest], 1)
+      journal: journal,
+      client: client,
+      downloader: downloader,
+      uploader: uploader,
+      requests: make(Chan[SyncRequest], 128)
     )
   end
 end

@@ -1,8 +1,14 @@
 require "context"
+require "fmt"
+require "io"
+require "net/url"
+require "os"
 require "path/filepath"
 require "sync"
 
 require "example.com/project/src/journal"
+require "example.com/project/src/vfs"
+require "github.com/bdragon300/tusgo/v2"
 require "github.com/rs/zerolog/log"
 
 # Uploads use the TUS protocol via github.com/bdragon300/tusgo/v2.
@@ -76,15 +82,142 @@ module Remote
       return id
     end
 
+    def UploadNow(ctx, rel) # (context.Context, string) -> error
+      self.setStateForRel(rel, UploadRunning)
+      err = self.uploadFile(ctx, rel)
+      if err
+        self.setStateForRel(rel, UploadFailed)
+        return err
+      end
+
+      self.setStateForRel(rel, UploadDone)
+      return nil
+    end
+
     def run(ctx, job) # (context.Context, *UploadJob)
       self.setState(job, UploadRunning)
-      log.Debug().Str("path", job.Rel).Int("id", job.ID).Msg("upload: not implemented")
-      self.setState(job, UploadFailed)
+      if (err = self.uploadFile(ctx, job.Rel))
+        log.Warn().Err(err).Str("path", job.Rel).Int("id", job.ID).Msg("upload failed")
+        self.setState(job, UploadFailed)
+        return
+      end
+
+      self.setState(job, UploadDone)
+    end
+
+    def uploadFile(ctx, rel) # (context.Context, string) -> error
+      abs = filepath.Join(self.mountpoint, rel)
+      st, err = os.Stat(abs)
+      if err
+        return err
+      end
+
+      if st.IsDir()
+        if (err = self.client.Mkdir(ctx, rel))
+          # may already exist
+          _, statErr = self.client.Stat(ctx, rel)
+          if statErr != nil
+            return err
+          end
+        end
+
+        return self.markSynced(rel, st)
+      end
+
+      # Skip dehydrated placeholders - they are not local content to upload.
+      attr, ok = vfs.RemoteFileInfoFromAttributes(abs)
+      if ok && attr.IsOK() && attr.State == vfs.StateDeHydrated
+        return nil
+      end
+
+      f, err = os.Open(abs)
+      if err
+        return err
+      end
+      defer f.Close()
+
+      baseURL, err = url.Parse(self.client.endpoint)
+      if err
+        return err
+      end
+
+      cl = tusgo.NewClient(baseURL)
+      cl.Client = self.client.hc
+
+      meta = make(Hash[string, string])
+      meta["filename"] = rel
+      meta["mtime"] = fmt.Sprintf("%d", st.ModTime().Unix())
+
+      up, err = cl.CreateUpload(st.Size(), false, meta)
+      if err
+        return fmt.Errorf("tus create: %w", err)
+      end
+
+      stream, err = tusgo.NewStream(cl, up)
+      if err
+        return fmt.Errorf("tus stream: %w", err)
+      end
+
+      _, err = stream.Sync()
+      if err != nil
+        return fmt.Errorf("tus sync: %w", err)
+      end
+
+      if stream.Tell() > 0
+        _, err = f.Seek(stream.Tell(), io.SeekStart)
+        if err != nil
+          return err
+        end
+      end
+
+      writer = tusgo.NewChunkedWriter(stream, 2 * 1024 * 1024)
+      _, err = io.Copy(writer, f)
+      if err
+        return fmt.Errorf("tus upload: %w", err)
+      end
+
+      _, err = writer.Flush()
+      if err != nil
+        return fmt.Errorf("tus flush: %w", err)
+      end
+
+      # Refresh remote metadata
+      entry, statErr = self.client.Stat(ctx, rel)
+      if statErr == nil
+        _ = self.journal.RecordRemote(rel, entry.ETag, entry.FileID, entry.Size, false, int64(0))
+        _ = self.journal.SetSynced(rel, vfs.StateHydrated, vfs.PinInherited, entry.ETag, entry.FileID, entry.Size, st.ModTime().Unix(), st.Size())
+      else
+        _ = self.journal.SetSynced(rel, vfs.StateHydrated, vfs.PinInherited, "", "", st.Size(), st.ModTime().Unix(), st.Size())
+      end
+
+      return nil
+    end
+
+    def markSynced(rel, st) # (string, os.FileInfo) -> error
+      mtime = int64(0)
+      size = int64(0)
+      if st != nil
+        mtime = st.ModTime().Unix()
+        size = st.Size()
+      end
+
+      _ = self.journal.SetSynced(rel, vfs.StateHydrated, vfs.PinInherited, "", "", size, mtime, size)
+      return nil
     end
 
     def setState(job, state) # (*UploadJob, UploadState)
       self.mu.Lock()
       job.State = state
+      self.mu.Unlock()
+    end
+
+    def setStateForRel(rel, state) # (string, UploadState)
+      self.mu.Lock()
+      self.jobs.each do |_, job|
+        if job.Rel == rel
+          job.State = state
+        end
+      end
       self.mu.Unlock()
     end
   end

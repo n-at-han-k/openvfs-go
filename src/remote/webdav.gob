@@ -1,23 +1,61 @@
 require "context"
 require "crypto/tls"
+require "encoding/xml"
 require "fmt"
 require "io"
 require "net/http"
+require "net/url"
+require "path"
+require "strconv"
 require "strings"
+require "time"
 
 require "github.com/migadu/go-webdav"
 require "github.com/rs/zerolog/log"
 
 module Remote
-  # Client wraps a WebDAV client for listing remote directories.
+  var Entry = Struct.new(
+    Path: string,
+    IsDir: bool,
+    Size: int64,
+    ETag: string,
+    FileID: string,
+    ModTime: time.Time
+  )
+
+  # Client wraps a WebDAV client for remote operations.
   class Client
     attr_accessor :endpoint, string
     attr_accessor :wc, @@webdav.Client
     attr_accessor :hc, webdav.HTTPClient
 
-    # List returns the entries in dir (Depth 1), relative to the endpoint.
-    def List(ctx, dir) # (context.Context, string) -> ([]webdav.FileInfo, error)
-      return self.wc.ReadDir(ctx, dir, false)
+    def urlFor(p) # (string) -> string
+      clean = strings.TrimLeft(p, "/")
+      base = strings.TrimRight(self.endpoint, "/")
+      if clean == ""
+        return base + "/"
+      end
+
+      return base + "/" + clean
+    end
+
+    # List returns entries in dir (Depth 1) including oc:fileid.
+    def List(ctx, dir) # (context.Context, string) -> ([]Entry, error)
+      return self.propfind(ctx, dir, "1")
+    end
+
+    # Stat returns a single entry.
+    def Stat(ctx, p) # (context.Context, string) -> (Entry, error)
+      entries, err = self.propfind(ctx, p, "0")
+      if err
+        return Entry.new(), err
+      end
+
+      if len(entries) == 0
+        return Entry.new(), fmt.Errorf("webdav stat %s: not found", p)
+      end
+
+      return entries[0], nil
     end
 
     # Open reads a remote file.
@@ -27,7 +65,7 @@ module Remote
 
     # OpenRange reads a remote file starting at offset, using HTTP Range.
     def OpenRange(ctx, path, offset) # (context.Context, string, int64) -> (io.ReadCloser, error)
-      url = strings.TrimRight(self.endpoint, "/") + "/" + strings.TrimLeft(path, "/")
+      url = self.urlFor(path)
       req, err = http.NewRequestWithContext(ctx, "GET", url, nil)
       if err
         return nil, err
@@ -51,6 +89,153 @@ module Remote
 
       return res.Body, nil
     end
+
+    def Mkdir(ctx, p) # (context.Context, string) -> error
+      return self.wc.Mkdir(ctx, p)
+    end
+
+    def RemoveAll(ctx, p) # (context.Context, string) -> error
+      return self.wc.RemoveAll(ctx, p)
+    end
+
+    def Move(ctx, src, dst, overwrite) # (context.Context, string, string, bool) -> error
+      return self.wc.Move(ctx, src, dst, @webdav.MoveOptions.new(NoOverwrite: !overwrite))
+    end
+
+    def propfind(ctx, dir, depth) # (context.Context, string, string) -> ([]Entry, error)
+      target = self.urlFor(dir)
+      body = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>" +
+        "<d:propfind xmlns:d=\"DAV:\" xmlns:oc=\"http://owncloud.org/ns\">" +
+        "<d:prop><d:resourcetype/><d:getetag/><d:getcontentlength/><d:getlastmodified/><oc:fileid/></d:prop>" +
+        "</d:propfind>"
+
+      req, err = http.NewRequestWithContext(ctx, "PROPFIND", target, strings.NewReader(body))
+      if err
+        return nil, err
+      end
+
+      req.Header.Set("Depth", depth)
+      req.Header.Set("Content-Type", "application/xml; charset=utf-8")
+
+      res, err = self.hc.Do(req)
+      if err
+        return nil, err
+      end
+
+      defer res.Body.Close()
+
+      if res.StatusCode != 207
+        b, _ = io.ReadAll(res.Body)
+        return nil, fmt.Errorf("webdav PROPFIND %s: %s: %s", dir, res.Status, string(b))
+      end
+
+      var :ms, MultiStatus
+      dec = xml.NewDecoder(res.Body)
+      if (err = dec.Decode(@ms))
+        return nil, err
+      end
+
+      basePath = self.endpointPath()
+      requested = path.Clean("/" + strings.TrimPrefix(basePath, "/") + "/" + strings.TrimLeft(dir, "/"))
+      requested = strings.TrimRight(requested, "/")
+
+      entries = Array[Entry].new
+      ms.Responses.each do |_, resp|
+        href = resp.Href
+        u, perr = url.Parse(href)
+        if perr == nil
+          href = u.Path
+        end
+
+        href = strings.TrimRight(path.Clean("/"+strings.TrimLeft(href, "/")), "/")
+        if depth == "1" && href == requested
+          next
+        end
+
+        rel = strings.TrimPrefix(href, strings.TrimRight(basePath, "/"))
+        rel = strings.TrimLeft(rel, "/")
+        if rel == ""
+          rel = "."
+        end
+
+        prop = resp.Propstat.Prop
+        isDir = prop.ResourceType.Collection != nil
+        size = int64(0)
+        if !isDir
+          n, nerr = strconv.ParseInt(strings.TrimSpace(prop.ContentLength), 10, 64)
+          if nerr == nil
+            size = n
+          end
+        end
+
+        mt = time.Time.new()
+        if prop.LastModified != ""
+          lastModified = strings.TrimSpace(prop.LastModified)
+          t, terr = time.Parse(time.RFC1123, lastModified)
+          if terr != nil
+            t, terr = time.Parse(time.RFC1123Z, lastModified)
+          end
+
+          if terr == nil
+            mt = t
+          end
+        end
+
+        entries = append(entries, Entry.new(
+          Path: rel,
+          IsDir: isDir,
+          Size: size,
+          ETag: strings.Trim(prop.ETag, "\""),
+          FileID: strings.TrimSpace(prop.FileID),
+          ModTime: mt
+        ))
+      end
+
+      return entries, nil
+    end
+
+    def endpointPath # () -> string
+      u, err = url.Parse(self.endpoint)
+      if err
+        return "/"
+      end
+
+      p = u.Path
+      if p == ""
+        return "/"
+      end
+
+      return p
+    end
+  end
+
+  # XML structs for PROPFIND parsing
+  class ResourceType
+    attr_accessor :Collection, @@CollectionElem # `xml:"DAV: collection"`
+  end
+
+  class CollectionElem
+  end
+
+  class Prop
+    attr_accessor :ResourceType,  ResourceType # `xml:"DAV: resourcetype"`
+    attr_accessor :ETag,          string # `xml:"DAV: getetag"`
+    attr_accessor :ContentLength, string # `xml:"DAV: getcontentlength"`
+    attr_accessor :LastModified,  string # `xml:"DAV: getlastmodified"`
+    attr_accessor :FileID,        string # `xml:"http://owncloud.org/ns fileid"`
+  end
+
+  class Propstat
+    attr_accessor :Prop, Prop # `xml:"DAV: prop"`
+  end
+
+  class Response
+    attr_accessor :Href,     string # `xml:"DAV: href"`
+    attr_accessor :Propstat, Propstat # `xml:"DAV: propstat"`
+  end
+
+  class MultiStatus
+    attr_accessor :Responses, Array[Response] # `xml:"DAV: response"`
   end
 
   # NewClient creates a WebDAV client with basic auth.

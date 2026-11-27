@@ -113,7 +113,10 @@ module Main
 
       remoteScanner = remote.NewScanner(rc)
 
-      syncer = NewSyncer(scanner, self.journal, remoteScanner)
+      downloader = remote.NewDownloader(self.Mountpoint, self.journal, rc)
+      uploader = remote.NewUploader(self.Mountpoint, self.journal, rc)
+
+      syncer = NewSyncer(scanner, self.journal, remoteScanner, rc, self.Mountpoint, downloader, uploader)
       go syncer.Run(ctx)
 
       # Socket is for desktop-client updates/notifications, not hydration.
@@ -144,8 +147,6 @@ module Main
         log.Info().Str("kind", event.Kind.String()).Msg("change")
         syncer.Request(SyncRequest.new(Cause: event))
       })
-
-      downloader = remote.NewDownloader(self.Mountpoint, self.journal, rc)
 
       go vfs.RunMount(ctx, self.Mountpoint, self.Owner, self.HydrationTimeout, lambda { |event| # (vfs.MountEvent)
         case event.Kind
