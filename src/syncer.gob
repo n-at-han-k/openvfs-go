@@ -1,6 +1,5 @@
 require "context"
 require "fmt"
-require "io/fs"
 require "os"
 require "path/filepath"
 require "sort"
@@ -187,10 +186,10 @@ module Main
           next
         end
 
-        if _, ok2 = handled[e.Path]; ok2
+        if (_, ok2 = handled[e.Path])
           next
         end
-        if _, ok2 = handled[newE.Path]; ok2
+        if (_, ok3 = handled[newE.Path])
           next
         end
 
@@ -201,7 +200,7 @@ module Main
 
         handled[e.Path] = true
         handled[newE.Path] = true
-        actions = actions.append(SyncAction.new(Op: OpMoveRemote, Path: newE.Path, From: e.Path, Entry: e))
+        actions = append(actions, SyncAction.new(Op: OpMoveRemote, Path: newE.Path, From: e.Path, Entry: e))
       end
 
       # Remote move detection: same fileid disappeared at old path and appeared at new path.
@@ -217,7 +216,7 @@ module Main
       end
 
       oldByFileID.each do |fid, oldE|
-        if _, ok = handled[oldE.Path]; ok
+        if (_, okOld = handled[oldE.Path])
           next
         end
         newE, ok = newByFileID[fid]
@@ -229,7 +228,7 @@ module Main
           next
         end
 
-        if _, ok = handled[newE.Path]; ok
+        if (_, okNew = handled[newE.Path])
           next
         end
 
@@ -237,14 +236,14 @@ module Main
         handled[newE.Path] = true
 
         if oldE.IsDir || newE.IsDir
-          actions = actions.append(SyncAction.new(Op: OpMoveLocal, Path: newE.Path, From: oldE.Path, Entry: newE))
+          actions = append(actions, SyncAction.new(Op: OpMoveLocal, Path: newE.Path, From: oldE.Path, Entry: newE))
         else
           localDirty = oldE.Dirty
           if localDirty
-            actions = actions.append(SyncAction.new(Op: OpConflict, Path: oldE.Path, Entry: oldE))
-            actions = actions.append(SyncAction.new(Op: OpDownloadPlaceholder, Path: newE.Path, Entry: newE))
+            actions = append(actions, SyncAction.new(Op: OpConflict, Path: oldE.Path, Entry: oldE))
+            actions = append(actions, SyncAction.new(Op: OpDownloadPlaceholder, Path: newE.Path, Entry: newE))
           else
-            actions = actions.append(SyncAction.new(Op: OpMoveLocal, Path: newE.Path, From: oldE.Path, Entry: newE))
+            actions = append(actions, SyncAction.new(Op: OpMoveLocal, Path: newE.Path, From: oldE.Path, Entry: newE))
           end
         end
       end
@@ -266,9 +265,9 @@ module Main
         # Remote deleted (was known remotely, not seen in this scan)
         if hadRemote && !remoteSeen
           if localExists && localDirty
-            actions = actions.append(SyncAction.new(Op: OpConflict, Path: e.Path, Entry: e))
+            actions = append(actions, SyncAction.new(Op: OpConflict, Path: e.Path, Entry: e))
           elsif localExists
-            actions = actions.append(SyncAction.new(Op: OpDeleteLocal, Path: e.Path, Entry: e))
+            actions = append(actions, SyncAction.new(Op: OpDeleteLocal, Path: e.Path, Entry: e))
           else
             _ = self.journal.Forget(e.Path)
           end
@@ -279,7 +278,7 @@ module Main
         if remoteSeen
           if e.IsDir
             if !localExists
-              actions = actions.append(SyncAction.new(Op: OpMkdirLocal, Path: e.Path, Entry: e))
+              actions = append(actions, SyncAction.new(Op: OpMkdirLocal, Path: e.Path, Entry: e))
             else
               _ = self.journal.SetSynced(e.Path, vfs.StateHydrated, vfs.PinInherited, e.RemoteEtag, e.RemoteFileID, e.RemoteSize, int64(0), int64(0))
             end
@@ -292,35 +291,35 @@ module Main
             if hadRemote && !localDirty
               # Local deleted, remote still exists. If remote unchanged, propagate delete; if changed, restore remote.
               if remoteChanged
-                actions = actions.append(SyncAction.new(Op: OpDownloadPlaceholder, Path: e.Path, Entry: e))
+                actions = append(actions, SyncAction.new(Op: OpDownloadPlaceholder, Path: e.Path, Entry: e))
               else
-                actions = actions.append(SyncAction.new(Op: OpDeleteRemote, Path: e.Path, Entry: e))
+                actions = append(actions, SyncAction.new(Op: OpDeleteRemote, Path: e.Path, Entry: e))
               end
             elsif hadRemote && localDirty
               # Local deleted but dirty? treat as conflict - restore remote.
-              actions = actions.append(SyncAction.new(Op: OpDownloadPlaceholder, Path: e.Path, Entry: e))
+              actions = append(actions, SyncAction.new(Op: OpDownloadPlaceholder, Path: e.Path, Entry: e))
             else
-              actions = actions.append(SyncAction.new(Op: OpDownloadPlaceholder, Path: e.Path, Entry: e))
+              actions = append(actions, SyncAction.new(Op: OpDownloadPlaceholder, Path: e.Path, Entry: e))
             end
             next
           end
 
           if remoteChanged
             if localDirty
-              actions = actions.append(SyncAction.new(Op: OpConflict, Path: e.Path, Entry: e))
+              actions = append(actions, SyncAction.new(Op: OpConflict, Path: e.Path, Entry: e))
             else
               attr, ok = vfs.RemoteFileInfoFromAttributes(filepath.Join(self.mountpoint, e.Path))
               if ok && attr.IsOK() && attr.State == vfs.StateHydrated
-                actions = actions.append(SyncAction.new(Op: OpDownloadContent, Path: e.Path, Entry: e))
+                actions = append(actions, SyncAction.new(Op: OpDownloadContent, Path: e.Path, Entry: e))
               else
-                actions = actions.append(SyncAction.new(Op: OpDownloadPlaceholder, Path: e.Path, Entry: e))
+                actions = append(actions, SyncAction.new(Op: OpDownloadPlaceholder, Path: e.Path, Entry: e))
               end
             end
             next
           end
 
           if localDirty
-            actions = actions.append(SyncAction.new(Op: OpUpload, Path: e.Path, Entry: e))
+            actions = append(actions, SyncAction.new(Op: OpUpload, Path: e.Path, Entry: e))
           else
             # Keep synced metadata fresh.
             st, stErr = os.Stat(filepath.Join(self.mountpoint, e.Path))
@@ -335,7 +334,7 @@ module Main
         if localExists
           if e.IsDir
             if !hadRemote
-              actions = actions.append(SyncAction.new(Op: OpMkdirRemote, Path: e.Path, Entry: e))
+              actions = append(actions, SyncAction.new(Op: OpMkdirRemote, Path: e.Path, Entry: e))
             end
             next
           end
@@ -347,12 +346,12 @@ module Main
               next
             end
 
-            actions = actions.append(SyncAction.new(Op: OpUpload, Path: e.Path, Entry: e))
+            actions = append(actions, SyncAction.new(Op: OpUpload, Path: e.Path, Entry: e))
             next
           end
 
           if localDirty
-            actions = actions.append(SyncAction.new(Op: OpConflict, Path: e.Path, Entry: e))
+            actions = append(actions, SyncAction.new(Op: OpConflict, Path: e.Path, Entry: e))
           end
         end
       end
@@ -536,7 +535,8 @@ module Main
         return err
       end
 
-      if _, err = os.Stat(src); err == nil
+      _, statErr = os.Stat(src)
+      if statErr == nil
         if (err = os.Rename(src, dst))
           return err
         end
