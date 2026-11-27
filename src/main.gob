@@ -43,47 +43,37 @@ module Main
       end
     })
 
-    go lambda {
-      syncer.Run(ctx)
-    }.()
+    go syncer.Run(ctx)
 
     socketPath = filepath.Join(os.TempDir(), "openvfs.sock")
 
-    go lambda {
-      openvfs.ServeAPI(ctx, socketPath, lambda { |event| # (directory.Event)
-        case
-        when events << event
-        when ctx.Done().<<
-        end
-      })
-    }.()
+    go openvfs.ServeAPI(ctx, socketPath, lambda { |event| # (directory.Event)
+      case
+      when events << event
+      when ctx.Done().<<
+      end
+    })
 
-    go lambda {
-      openvfs.Run(ctx, root, "openvfs:local", socketPath, lambda { |event| # (directory.Event)
-        case
-        when events << event
-        when ctx.Done().<<
-        end
-      })
-    }.()
+    go openvfs.Run(ctx, root, "openvfs:local", socketPath, lambda { |event| # (directory.Event)
+      case
+      when events << event
+      when ctx.Done().<<
+      end
+    })
 
-    go lambda {
-      directory.RunWatcher(ctx, root, ignored, lambda { |event| # (directory.Event)
-        case
-        when events << event
-        when ctx.Done().<<
-        end
-      })
-    }.()
+    go directory.RunWatcher(ctx, root, ignored, lambda { |event| # (directory.Event)
+      case
+      when events << event
+      when ctx.Done().<<
+      end
+    })
 
-    go lambda {
-      directory.RunPoller(ctx, 30 * time.Second, lambda { |event| # (directory.Event)
-        case
-        when events << event
-        when ctx.Done().<<
-        end
-      })
-    }.()
+    go directory.RunPoller(ctx, 30 * time.Second, lambda { |event| # (directory.Event)
+      case
+      when events << event
+      when ctx.Done().<<
+      end
+    })
 
     loop do
       case
