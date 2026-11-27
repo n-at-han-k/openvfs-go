@@ -129,7 +129,7 @@ module Main
         syncer.Request(SyncRequest.new(Cause: event))
       })
 
-      go vfs.RunMount(ctx, self.Mountpoint, self.Mountpoint, self.Owner, self.HydrationTimeout, lambda { |event| # (vfs.MountEvent)
+      go vfs.RunMount(ctx, self.Mountpoint, self.Owner, self.HydrationTimeout, lambda { |event| # (vfs.MountEvent)
         socket.SendMessage(event)
       })
 

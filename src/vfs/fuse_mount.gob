@@ -1,8 +1,6 @@
 require "context"
 require "fmt"
 require "os"
-require "path/filepath"
-require "strings"
 require "syscall"
 require "time"
 
@@ -52,11 +50,11 @@ module Vfs
   class FuseMount
     attr_accessor :Root,       string
     attr_accessor :Mountpoint, string
-    attr_accessor :MountRel,   string
     attr_accessor :Owner,      string
     attr_accessor :Version,    int
     attr_accessor :PID,        int
     attr_accessor :Server,     @@gofuse.Server
+    attr_accessor :BackingDir, @@os.File
     attr_accessor :Timeout,    time.Duration
     attr_accessor :onEvent,    Proc[MountEvent]
 
@@ -119,27 +117,17 @@ module Vfs
     end
   end
 
-  def NewFuseMount(root, mountpoint, owner, timeout, onEvent) # (string, string, string, time.Duration, func(MountEvent)) -> (*FuseMount, error)
-    log.Debug().Str("root", root).Str("mountpoint", mountpoint).Msg("mount: stat root")
+  def NewFuseMount(mountpoint, owner, timeout, onEvent) # (string, string, time.Duration, func(MountEvent)) -> (*FuseMount, error)
+    log.Debug().Str("mountpoint", mountpoint).Msg("mount: stat mountpoint")
 
     var :st, syscall.Stat_t
-    if (err = syscall.Stat(root, @st))
+    if (err = syscall.Stat(mountpoint, @st))
       return nil, err
     end
 
-    rel, relErr = filepath.Rel(root, mountpoint)
-    mountRel = ""
-    if relErr == nil
-      rel = filepath.ToSlash(filepath.Clean(rel))
-      if rel != "." && rel != ".." && !strings.HasPrefix(rel, "../")
-        mountRel = rel
-      end
-    end
-
     m = @FuseMount.new(
-      Root:       root,
+      Root:       mountpoint,
       Mountpoint: mountpoint,
-      MountRel:   mountRel,
       Owner:      owner,
       PID:        os.Getpid(),
       Timeout:    timeout,
@@ -152,9 +140,20 @@ module Vfs
       return nil, err
     end
 
+    if (err = os.MkdirAll(mountpoint, 0755))
+      return nil, err
+    end
+
+    backingDir, err = os.Open(mountpoint)
+    if err
+      return nil, err
+    end
+
+    m.BackingDir = backingDir
+
     log.Debug().Uint64("dev", uint64(st.Dev)).Msg("mount: build root node")
 
-    rootData = @fs.LoopbackRoot.new(Path: root, Dev: uint64(st.Dev))
+    rootData = @fs.LoopbackRoot.new(Path: fmt.Sprintf("/proc/self/fd/%d", backingDir.Fd()), Dev: uint64(st.Dev))
     node = @FuseNodeHandler.new(LoopbackNode: @fs.LoopbackNode.new(RootData: rootData), FuseMount: m)
     rootData.RootNode = node
 
@@ -168,19 +167,16 @@ module Vfs
       NegativeTimeout: @noCache,
       MountOptions: gofuse.MountOptions.new(
         Name: "openvfs",
-        FsName: root,
+        FsName: mountpoint,
         Debug: debug
       )
     )
-
-    if (err = os.MkdirAll(mountpoint, 0755))
-      return nil, err
-    end
 
     log.Debug().Str("mountpoint", mountpoint).Bool("fuseDebug", debug).Msg("mount: calling fs.Mount")
 
     server, err = fs.Mount(mountpoint, node, opts)
     if err != nil
+      backingDir.Close()
       log.Debug().Err(err).Msg("mount: fs.Mount failed")
       return nil, err
     end
@@ -192,14 +188,14 @@ module Vfs
     return m, nil
   end
 
-  def RunMount(ctx, root, mountpoint, owner, timeout, onEvent) # (context.Context, string, string, string, time.Duration, func(MountEvent))
-    m, err = NewFuseMount(root, mountpoint, owner, timeout, onEvent)
+  def RunMount(ctx, mountpoint, owner, timeout, onEvent) # (context.Context, string, string, time.Duration, func(MountEvent))
+    m, err = NewFuseMount(mountpoint, owner, timeout, onEvent)
     if err
       log.Warn().Err(err).Str("mountpoint", mountpoint).Msg("mount")
       return
     end
 
-    log.Info().Str("root", root).Str("mountpoint", mountpoint).Int("pid", m.PID).Msg("mounted")
+    log.Info().Str("mountpoint", mountpoint).Int("pid", m.PID).Msg("mounted")
 
     go lambda {
       ←.ctx.Done()
@@ -212,6 +208,10 @@ module Vfs
     log.Debug().Str("mountpoint", mountpoint).Msg("mount: waiting for server")
 
     m.Server.Wait()
+
+    if m.BackingDir != nil
+      m.BackingDir.Close()
+    end
 
     log.Info().Str("mountpoint", mountpoint).Msg("unmounted")
   end

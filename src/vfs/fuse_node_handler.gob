@@ -17,69 +17,6 @@ module Vfs
       return @FuseNodeHandler.new(LoopbackNode: ops.(@@fs.LoopbackNode), FuseMount: self.FuseMount)
     end
 
-    def hideChild(name) # (string) -> bool
-      if self.FuseMount.MountRel == ""
-        return false
-      end
-
-      child = filepath.ToSlash(filepath.Join(self.Path(nil), name))
-      return child == self.FuseMount.MountRel
-    end
-
-    def Lookup(ctx, name, out) # (context.Context, string, *gofuse.EntryOut) -> (*fs.Inode, syscall.Errno)
-      if self.hideChild(name)
-        return nil, syscall.ENOENT
-      end
-
-      return self.LoopbackNode.Lookup(ctx, name, out)
-    end
-
-    def filterDirStream(stream) # (fs.DirStream) -> (fs.DirStream, syscall.Errno)
-      if self.FuseMount.MountRel == ""
-        return stream, 0
-      end
-
-      var :entries, Array[gofuse.DirEntry]
-
-      while stream.HasNext()
-        e, errno = stream.Next()
-        if errno != 0
-          stream.Close()
-          return nil, errno
-        end
-
-        unless self.hideChild(e.Name)
-          entries = append(entries, e)
-        end
-      end
-
-      stream.Close()
-      return fs.NewListDirStream(entries), 0
-    end
-
-    def Readdir(ctx) # (context.Context) -> (fs.DirStream, syscall.Errno)
-      stream, errno = self.LoopbackNode.Readdir(ctx)
-      if errno != 0
-        return nil, errno
-      end
-
-      return self.filterDirStream(stream)
-    end
-
-    def OpendirHandle(ctx, flags) # (context.Context, uint32) -> (fs.FileHandle, uint32, syscall.Errno)
-      ds, errno = fs.NewLoopbackDirStream(self.backingPath())
-      if errno != 0
-        return nil, 0, errno
-      end
-
-      filtered, ferr = self.filterDirStream(ds)
-      if ferr != 0
-        return nil, 0, ferr
-      end
-
-      return filtered, 0, 0
-    end
-
     def backingPath # () -> string
       return filepath.Join(self.RootData.Path, self.Path(nil))
     end
