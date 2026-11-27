@@ -3,14 +3,17 @@ require "os"
 require "os/exec"
 require "path/filepath"
 require "syscall"
+require "unsafe"
 
 require "example.com/project/src/directory"
 require "github.com/hanwen/go-fuse/v2/fs"
 require "github.com/hanwen/go-fuse/v2/fuse", gofuse
+require "golang.org/x/sys/unix"
 
 module Vfs
-  # Mount is a live FUSE mount.
+  # Mount is a live FUSE mount and the root filesystem node.
   class Mount
+    attr_accessor fs.Inode
     attr_accessor :Root, string
     attr_accessor :Mountpoint, string
     attr_accessor :PID, int
@@ -31,167 +34,181 @@ module Vfs
       end
     end
 
-    def relPath(p) # (string) -> string
-      rel, err = filepath.Rel(self.Root, p)
-      if err
-        return p
-      end
-      return filepath.ToSlash(rel)
-    end
-
     # --- FUSE operations ---
 
-    def Lookup(ctx, n, name, out) # (context.Context, *Node, string, *gofuse.EntryOut) -> (*fs.Inode, syscall.Errno)
-      return n.Loopback.Lookup(ctx, name, out)
-    end
-
-    def Getattr(ctx, n, f, out) # (context.Context, *Node, fs.FileHandle, *gofuse.AttrOut) -> syscall.Errno
-      return n.Loopback.Getattr(ctx, f, out)
-    end
-
-    def Readdir(ctx, n) # (context.Context, *Node) -> (fs.DirStream, syscall.Errno)
-      return n.Loopback.Readdir(ctx)
-    end
-
-    def Open(ctx, n, flags) # (context.Context, *Node, uint32) -> (fs.FileHandle, uint32, syscall.Errno)
-      return n.Loopback.Open(ctx, flags)
-    end
-
-    def Create(ctx, n, name, flags, mode, out) # (context.Context, *Node, string, uint32, uint32, *gofuse.EntryOut) -> (*fs.Inode, fs.FileHandle, uint32, syscall.Errno)
-      inode, fh, fflags, errno = n.Loopback.Create(ctx, name, flags, mode, out)
-      if errno == 0
-        self.emit(directory.Create, filepath.ToSlash(filepath.Join(n.relPath(self.Root), name)))
-      end
-      return inode, fh, fflags, errno
-    end
-
-    def Mkdir(ctx, n, name, mode, out) # (context.Context, *Node, string, uint32, *gofuse.EntryOut) -> (*fs.Inode, syscall.Errno)
-      inode, errno = n.Loopback.Mkdir(ctx, name, mode, out)
-      if errno == 0
-        self.emit(directory.Create, filepath.ToSlash(filepath.Join(n.relPath(self.Root), name)))
-      end
-      return inode, errno
-    end
-
-    def Unlink(ctx, n, name) # (context.Context, *Node, string) -> syscall.Errno
-      errno = n.Loopback.Unlink(ctx, name)
-      if errno == 0
-        self.emit(directory.Remove, filepath.ToSlash(filepath.Join(n.relPath(self.Root), name)))
-      end
-      return errno
-    end
-
-    def Rmdir(ctx, n, name) # (context.Context, *Node, string) -> syscall.Errno
-      errno = n.Loopback.Rmdir(ctx, name)
-      if errno == 0
-        self.emit(directory.Remove, filepath.ToSlash(filepath.Join(n.relPath(self.Root), name)))
-      end
-      return errno
-    end
-
-    def Rename(ctx, n, name, newParent, newName, flags) # (context.Context, *Node, string, fs.InodeEmbedder, string, uint32) -> syscall.Errno
-      errno = n.Loopback.Rename(ctx, name, newParent, newName, flags)
-      if errno == 0
-        self.emit(directory.Rename, filepath.ToSlash(filepath.Join(n.relPath(self.Root), name)))
-      end
-      return errno
-    end
-
-    def Setattr(ctx, n, f, input, out) # (context.Context, *Node, fs.FileHandle, *gofuse.SetAttrIn, *gofuse.AttrOut) -> syscall.Errno
-      errno = n.Loopback.Setattr(ctx, f, input, out)
-      if errno == 0
-        self.emit(directory.Write, n.relPath(self.Root))
-      end
-      return errno
-    end
-  end
-
-  # Node is a FUSE filesystem node that delegates operations to Mount.
-  class Node
-    attr_accessor :Loopback, @@fs.LoopbackNode
-    attr_accessor :mount, @@Mount
-
-    def embed # () -> *fs.Inode
-      return self.Loopback.EmbeddedInode()
-    end
-
-    def EmbeddedInode # () -> *fs.Inode
-      return self.Loopback.EmbeddedInode()
-    end
-
-    def relPath(root) # (string) -> string
-      p = self.Loopback.Path(nil)
-      rel, err = filepath.Rel(root, p)
-      if err
-        return p
-      end
-      return filepath.ToSlash(rel)
-    end
-
     def Lookup(ctx, name, out) # (context.Context, string, *gofuse.EntryOut) -> (*fs.Inode, syscall.Errno)
-      return self.mount.Lookup(ctx, self, name, out)
+      p = filepath.Join(self.Root, filepath.Join(self.Path(nil), name))
+      var :st, unix.Stat_t
+      err = unix.Lstat(p, @st)
+      if err
+        return nil, fs.ToErrno(err)
+      end
+      out.Attr.FromStat(@@syscall.Stat_t.(unsafe.Pointer(@st)))
+      child = @Mount.new(Root: self.Root, onChange: self.onChange)
+      return self.NewInode(ctx, child, fs.StableAttr.new(Mode: uint32(st.Mode), Ino: st.Ino)), 0
     end
 
     def Getattr(ctx, f, out) # (context.Context, fs.FileHandle, *gofuse.AttrOut) -> syscall.Errno
-      return self.mount.Getattr(ctx, self, f, out)
+      var :st, unix.Stat_t
+      err = unix.Lstat(filepath.Join(self.Root, self.Path(nil)), @st)
+      if err
+        return fs.ToErrno(err)
+      end
+      out.Attr.FromStat(@@syscall.Stat_t.(unsafe.Pointer(@st)))
+      return 0
     end
 
     def Readdir(ctx) # (context.Context) -> (fs.DirStream, syscall.Errno)
-      return self.mount.Readdir(ctx, self)
+      entries, err = os.ReadDir(filepath.Join(self.Root, self.Path(nil)))
+      if err
+        return nil, fs.ToErrno(err)
+      end
+      var :dirEntries, Array[gofuse.DirEntry]
+      entries.each do |_, e|
+        info, ierr = e.Info()
+        if ierr != nil
+          next
+        end
+        dirEntries = append(dirEntries, gofuse.DirEntry.new(Name: e.Name(), Mode: uint32(info.Mode())))
+      end
+      return fs.NewListDirStream(dirEntries), 0
     end
 
     def Open(ctx, flags) # (context.Context, uint32) -> (fs.FileHandle, uint32, syscall.Errno)
-      return self.mount.Open(ctx, self, flags)
+      f, err = os.OpenFile(filepath.Join(self.Root, self.Path(nil)), int(flags), 0)
+      if err
+        return nil, 0, fs.ToErrno(err)
+      end
+      return fs.NewLoopbackFileFromOS(f), gofuse.FOPEN_KEEP_CACHE, 0
     end
 
     def Create(ctx, name, flags, mode, out) # (context.Context, string, uint32, uint32, *gofuse.EntryOut) -> (*fs.Inode, fs.FileHandle, uint32, syscall.Errno)
-      return self.mount.Create(ctx, self, name, flags, mode, out)
+      p = filepath.Join(self.Root, filepath.Join(self.Path(nil), name))
+      f, err = os.OpenFile(p, int(flags)|os.O_CREATE, os.FileMode(mode))
+      if err
+        return nil, nil, 0, fs.ToErrno(err)
+      end
+      var :st, unix.Stat_t
+      serr = unix.Lstat(p, @st)
+      if serr != nil
+        f.Close()
+        return nil, nil, 0, fs.ToErrno(serr)
+      end
+      out.Attr.FromStat(@@syscall.Stat_t.(unsafe.Pointer(@st)))
+      child = @Mount.new(Root: self.Root, onChange: self.onChange)
+      inode = self.NewInode(ctx, child, fs.StableAttr.new(Mode: uint32(st.Mode), Ino: st.Ino))
+      self.emit(directory.Create, filepath.ToSlash(filepath.Join(self.Path(nil), filepath.Base(p))))
+      return inode, fs.NewLoopbackFileFromOS(f), gofuse.FOPEN_KEEP_CACHE, 0
     end
 
     def Mkdir(ctx, name, mode, out) # (context.Context, string, uint32, *gofuse.EntryOut) -> (*fs.Inode, syscall.Errno)
-      return self.mount.Mkdir(ctx, self, name, mode, out)
+      p = filepath.Join(self.Root, filepath.Join(self.Path(nil), name))
+      err = os.Mkdir(p, os.FileMode(mode))
+      if err
+        return nil, fs.ToErrno(err)
+      end
+      var :st, unix.Stat_t
+      serr = unix.Lstat(p, @st)
+      if serr != nil
+        return nil, fs.ToErrno(serr)
+      end
+      out.Attr.FromStat(@@syscall.Stat_t.(unsafe.Pointer(@st)))
+      child = @Mount.new(Root: self.Root, onChange: self.onChange)
+      inode = self.NewInode(ctx, child, fs.StableAttr.new(Mode: uint32(st.Mode), Ino: st.Ino))
+      self.emit(directory.Create, filepath.ToSlash(filepath.Join(self.Path(nil), filepath.Base(p))))
+      return inode, 0
     end
 
     def Unlink(ctx, name) # (context.Context, string) -> syscall.Errno
-      return self.mount.Unlink(ctx, self, name)
+      p = filepath.Join(self.Root, filepath.Join(self.Path(nil), name))
+      err = syscall.Unlink(p)
+      if err
+        return fs.ToErrno(err)
+      end
+      self.emit(directory.Remove, filepath.ToSlash(filepath.Join(self.Path(nil), filepath.Base(p))))
+      return 0
     end
 
     def Rmdir(ctx, name) # (context.Context, string) -> syscall.Errno
-      return self.mount.Rmdir(ctx, self, name)
+      p = filepath.Join(self.Root, filepath.Join(self.Path(nil), name))
+      err = syscall.Rmdir(p)
+      if err
+        return fs.ToErrno(err)
+      end
+      self.emit(directory.Remove, filepath.ToSlash(filepath.Join(self.Path(nil), filepath.Base(p))))
+      return 0
     end
 
     def Rename(ctx, name, newParent, newName, flags) # (context.Context, string, fs.InodeEmbedder, string, uint32) -> syscall.Errno
-      return self.mount.Rename(ctx, self, name, newParent, newName, flags)
+      p = filepath.Join(self.Root, filepath.Join(self.Path(nil), name))
+      np, ok = newParent.(@@Mount)
+      if !ok
+        return syscall.EXDEV
+      end
+      newP = filepath.Join(filepath.Join(self.Root, np.Path(nil)), newName)
+      err = syscall.Rename(p, newP)
+      if err
+        return fs.ToErrno(err)
+      end
+      self.emit(directory.Rename, filepath.ToSlash(filepath.Join(self.Path(nil), filepath.Base(p))))
+      return 0
     end
 
     def Setattr(ctx, f, input, out) # (context.Context, fs.FileHandle, *gofuse.SetAttrIn, *gofuse.AttrOut) -> syscall.Errno
-      return self.mount.Setattr(ctx, self, f, input, out)
+      p = filepath.Join(self.Root, self.Path(nil))
+      if (mode, ok = input.GetMode())
+        if (err = syscall.Chmod(p, mode))
+          return fs.ToErrno(err)
+        end
+      end
+      if (uid, ok = input.GetUID())
+        gid, _ = input.GetGID()
+        if (err = syscall.Chown(p, int(uid), int(gid)))
+          return fs.ToErrno(err)
+        end
+      end
+      if (size, ok = input.GetSize())
+        if (err = syscall.Truncate(p, int64(size)))
+          return fs.ToErrno(err)
+        end
+      end
+      atime, aok = input.GetATime()
+      mtime, mok = input.GetMTime()
+      if aok || mok
+        var :ts, Array[unix.Timespec, 2]
+        if aok
+          ts[0] = unix.Timespec.new(Sec: atime.Unix(), Nsec: int64(atime.Nanosecond()))
+        else
+          ts[0] = unix.Timespec.new(Sec: 0, Nsec: unix.UTIME_OMIT)
+        end
+        if mok
+          ts[1] = unix.Timespec.new(Sec: mtime.Unix(), Nsec: int64(mtime.Nanosecond()))
+        else
+          ts[1] = unix.Timespec.new(Sec: 0, Nsec: unix.UTIME_OMIT)
+        end
+        if (err = unix.UtimesNanoAt(unix.AT_FDCWD, p, ts[], 0))
+          return fs.ToErrno(err)
+        end
+      end
+      self.emit(directory.Write, filepath.ToSlash(self.Path(nil)))
+      return self.Getattr(ctx, f, out)
+    end
+
+    def Readlink(ctx) # (context.Context) -> ([]byte, syscall.Errno)
+      target, err = os.Readlink(filepath.Join(self.Root, self.Path(nil)))
+      if err
+        return nil, fs.ToErrno(err)
+      end
+      return Array[byte].(target), 0
     end
   end
 
   # NewMount mounts root at mountpoint and returns a Mount.
   def NewMount(root, mountpoint, onChange) # (string, string, func(directory.Event)) -> (*Mount, error)
-    # Best-effort cleanup of a stale mount from a previous crash.
     _ = exec.Command("fusermount3", "-u", mountpoint).Run()
     _ = exec.Command("fusermount", "-u", mountpoint).Run()
 
-    rootNode, err = fs.NewLoopbackRoot(root)
-    if err
-      return nil, err
-    end
-
     m = @Mount.new(Root: root, Mountpoint: mountpoint, PID: os.Getpid(), onChange: onChange)
-
-    if (lb, ok = rootNode.(@@fs.LoopbackNode))
-      n = @Node.new(Loopback: lb, mount: m)
-      n.Loopback.RootData.RootNode = n
-      n.Loopback.RootData.NewNode = lambda { |rootData, parent, name, st| # (*fs.LoopbackRoot, *fs.Inode, string, *syscall.Stat_t) -> fs.InodeEmbedder
-        child = @Node.new(mount: m)
-        child.Loopback = @fs.LoopbackNode.new(RootData: rootData)
-        return child
-      }
-      rootNode = n
-    end
 
     opts = @fs.Options.new(
       MountOptions: gofuse.MountOptions.new(
@@ -200,13 +217,12 @@ module Vfs
       )
     )
 
-    server, err = fs.Mount(mountpoint, rootNode, opts)
+    server, err = fs.Mount(mountpoint, m, opts)
     if err
       return nil, err
     end
 
     m.Server = server
-
     return m, nil
   end
 end
