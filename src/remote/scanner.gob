@@ -1,0 +1,67 @@
+require "context"
+require "net/url"
+require "path"
+require "strings"
+
+require "github.com/migadu/go-webdav"
+require "github.com/rs/zerolog/log"
+
+module Remote
+  # Scanner lists remote files over WebDAV.
+  class Scanner
+    attr_accessor :client, @@Client
+
+    # Scan walks dir recursively and calls onEntry for each file found.
+    def Scan(ctx, dir, onEntry) # (context.Context, string, func(webdav.FileInfo)) -> error
+      entries, err = self.client.List(ctx, dir)
+      if err
+        return err
+      end
+
+      entries.each do |_, entry|
+        name = path.Base(strings.TrimRight(entry.Path, "/"))
+        if name == "." || name == ""
+          next
+        end
+
+        cleanDir = strings.TrimRight(dir, "/")
+        entryPath = cleanDir + "/" + name
+        if cleanDir == ""
+          entryPath = name
+        end
+
+        # Skip the directory itself.
+        entryTrimmed = strings.TrimRight(entry.Path, "/")
+        u, _ = url.Parse(self.client.endpoint)
+        requestedPath = strings.TrimRight(u.Path, "/")
+        if cleanDir != ""
+          requestedPath = requestedPath + "/" + strings.TrimLeft(cleanDir, "/")
+        end
+        if entry.IsDir && entryTrimmed == requestedPath
+          next
+        end
+
+        if entry.IsDir
+          log.Info().Str("path", entryPath).Msg("remote dir")
+          if onEntry != nil
+            onEntry(entry)
+          end
+          if (err = self.Scan(ctx, entryPath, onEntry))
+            log.Warn().Err(err).Str("path", entryPath).Msg("remote scan")
+          end
+        else
+          log.Info().Str("path", entryPath).Int64("size", entry.Size).Str("etag", entry.ETag).Msg("remote file")
+          if onEntry != nil
+            onEntry(entry)
+          end
+        end
+      end
+
+      return nil
+    end
+  end
+
+  def NewScanner(client) # (*Client) -> *Scanner
+    return @Scanner.new(client: client)
+  end
+end

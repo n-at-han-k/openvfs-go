@@ -1,0 +1,57 @@
+require "context"
+
+require "example.com/project/src/journal"
+require "example.com/project/src/remote"
+require "github.com/rs/zerolog/log"
+
+module Directory
+  var SyncRequest = Struct.new(Cause: Event)
+
+  # Syncer coordinates local scan, remote scan, and reconciliation.
+  class Syncer
+    attr_accessor :scanner, @@Scanner
+    attr_accessor :remote, @@remote.Scanner
+    attr_accessor :journal, @@journal.Journal
+    attr_accessor :requests, Chan[SyncRequest]
+
+    def Request(req) # (SyncRequest) -> bool
+      case
+      when self.requests << req
+        return true
+      else
+        return false
+      end
+    end
+
+    def Run(ctx) # (context.Context)
+      loop do
+        case
+        when ←.ctx.Done()
+          return
+        when req = ←.self.requests
+          self.sync(ctx, req)
+        end
+      end
+    end
+
+    def sync(ctx, req) # (context.Context, SyncRequest)
+      log.Info().Str("cause", req.Cause.Kind.String()).Msg("sync")
+
+      if (err = self.scanner.Scan(nil))
+        log.Warn().Err(err).Msg("local scan")
+      end
+
+      if self.remote != nil
+        if (err = self.remote.Scan(ctx, "", nil))
+          log.Warn().Err(err).Msg("remote scan")
+        end
+      end
+
+      # TODO: reconcile local + remote + journal into SyncFileItems.
+    end
+  end
+
+  def NewSyncer(scanner, journal, remoteScanner) # (*Scanner, *journal.Journal, *remote.Scanner) -> *Syncer
+    return @Syncer.new(scanner: scanner, journal: journal, remote: remoteScanner, requests: make(Chan[SyncRequest], 1))
+  end
+end

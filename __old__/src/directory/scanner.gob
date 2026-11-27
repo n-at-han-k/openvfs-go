@@ -8,8 +8,7 @@ require "github.com/rs/zerolog/log"
 
 module Directory
   class Scanner
-    attr_accessor :root, string
-    # func(string) bool
+    attr_accessor :root, string # func(string) bool
     attr_accessor :ignored, Proc
     attr_accessor :journal, @@journal.Journal
 

@@ -1,14 +1,14 @@
 require "context"
-require "io/fs"
 require "os"
 require "os/signal"
 require "path/filepath"
 require "syscall"
 require "time"
 
-require "example.com/project/packages/openvfs"
 require "example.com/project/src/directory"
+require "example.com/project/src/vfs"
 require "example.com/project/src/journal"
+require "example.com/project/src/remote"
 require "github.com/rs/zerolog"
 require "github.com/rs/zerolog/log"
 require "github.com/spf13/cobra"
@@ -16,7 +16,7 @@ require "github.com/spf13/cobra"
 module Main
   # run opens the journal, mounts root at mountpoint, watches root and serves
   # until the process is interrupted.
-  def run(root, mountpoint, dbPath) # (string, string, string) -> error
+  def run(root, mountpoint, dbPath, remoteURL, remoteUser, remotePass, remoteInsecure) # (string, string, string, string, string, string, bool) -> error
     ctx, cancel = signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
     defer cancel()
 
@@ -39,49 +39,49 @@ module Main
       return base == dbName || base == dbName + "-wal" || base == dbName + "-shm"
     }
 
-    if (err = scan(j, root, ignored))
-      log.Warn().Err(err).Msg("initial scan")
+    scanner = directory.NewScanner(root, ignored, j)
+
+    var :rs, @@remote.Scanner
+    if remoteURL != ""
+      rc, err = remote.NewClient(remoteURL, remoteUser, remotePass, remoteInsecure)
+      if err
+        log.Warn().Err(err).Msg("remote client")
+      else
+        rs = remote.NewScanner(rc)
+      end
     end
 
+    syncer = directory.NewSyncer(scanner, j, rs)
+    go syncer.Run(ctx)
+
+    syncer.Request(directory.SyncRequest.new(Cause: directory.Event.new(Kind: directory.Rescan)))
+
     go directory.RunWatcher(ctx, root, ignored, lambda { |event| # (directory.Event)
-      if event.Kind == directory.Rescan || event.Kind == directory.Poll
-        log.Info().Str("kind", event.Kind.String()).Msg("change")
-        if (err = scan(j, root, ignored))
-          log.Warn().Err(err).Str("kind", event.Kind.String()).Msg("scan")
-        end
-
-        return
-      end
-
+      log.Info().Str("kind", event.Kind.String()).Str("path", event.Path).Msg("change")
+      syncer.Request(directory.SyncRequest.new(Cause: event))
       record(j, root, event)
     })
 
     go directory.RunPoller(ctx, 30 * time.Second, lambda { |event| # (directory.Event)
-      if event.Kind == directory.Rescan || event.Kind == directory.Poll
-        log.Info().Str("kind", event.Kind.String()).Msg("change")
-        if (err = scan(j, root, ignored))
-          log.Warn().Err(err).Str("kind", event.Kind.String()).Msg("scan")
-        end
-
-        return
-      end
-
-      record(j, root, event)
+      log.Info().Str("kind", event.Kind.String()).Msg("change")
+      syncer.Request(directory.SyncRequest.new(Cause: event))
     })
 
-    server, err = openvfs.Mount(root, mountpoint)
+    m, err = vfs.NewMount(root, mountpoint, lambda { |event| # (directory.Event)
+      record(j, root, event)
+    })
     if err
       return err
     end
 
-    log.Info().Str("root", root).Str("mountpoint", mountpoint).Msg("mounted")
+    log.Info().Str("root", root).Str("mountpoint", mountpoint).Int("pid", m.PID).Msg("mounted")
 
     go lambda {
-      ←ctx.Done()
-      _ = server.Unmount()
+      ←.ctx.Done()
+      _ = m.Unmount()
     }.()
 
-    server.Wait()
+    m.Wait()
 
     log.Info().Msg("unmounted")
 
@@ -89,85 +89,6 @@ module Main
   end
 
   # inodeOf is the file's inode, or 0 where the platform does not report one.
-  def inodeOf(st) # (os.FileInfo) -> uint64
-    if (sys, ok = st.Sys().(@@syscall.Stat_t))
-      return uint64(sys.Ino)
-    end
-
-    return 0
-  end
-
-  # scan walks root and reconciles the journal with what is on disk.
-  def scan(j, root, ignored) # (*journal.Journal, string, func(string) bool) -> error
-    seen = make(Hash[string, bool])
-
-    err = filepath.WalkDir(root, lambda { |path, d, err| # (string, fs.DirEntry, error) -> error
-      if err
-        return err
-      end
-
-      rel, err = filepath.Rel(root, path)
-      if err
-        return err
-      end
-
-      rel = filepath.ToSlash(rel)
-
-      if rel == "."
-        return nil
-      end
-
-      if ignored(rel)
-        if d.IsDir()
-          return filepath.SkipDir
-        end
-
-        return nil
-      end
-
-      if d.IsDir()
-        return nil
-      end
-
-      info, err = d.Info()
-      if err
-        return err
-      end
-
-      seen[rel] = true
-
-      if (err = j.Record(rel, inodeOf(info), info.ModTime().Unix(), info.Size()))
-        log.Warn().Err(err).Str("path", rel).Msg("record")
-      end
-
-      return nil
-    })
-
-    if err
-      return err
-    end
-
-    paths, err = j.Paths()
-    if err
-      return err
-    end
-
-    paths.each do |_, p|
-      if (_, ok = seen[p])
-        next
-      end
-
-      if ignored(p)
-        next
-      end
-
-      if (err = j.Forget(p))
-        log.Warn().Err(err).Str("path", p).Msg("forget")
-      end
-    end
-
-    return nil
-  end
 
   # record folds one watcher event into the journal.
   def record(j, root, event) # (*journal.Journal, string, directory.Event)
@@ -194,7 +115,7 @@ module Main
       return
     end
 
-    inode = inodeOf(st)
+    inode = directory.InodeOf(st)
 
     # A create whose inode is already on record is the far end of a rename, so
     # the path it moved from goes away.
@@ -244,12 +165,21 @@ module Main
           dbPath = filepath.Join(root, "sync-journal.db")
         end
 
-        return run(root, mountpoint, dbPath)
+        remoteURL, _ = cmd.Flags().GetString("remote")
+        remoteUser, _ = cmd.Flags().GetString("remote-user")
+        remotePass, _ = cmd.Flags().GetString("remote-pass")
+        remoteInsecure, _ = cmd.Flags().GetBool("remote-insecure")
+
+        return run(root, mountpoint, dbPath, remoteURL, remoteUser, remotePass, remoteInsecure)
       }
     )
 
     rootCmd.Flags().String("db", "", "journal database path")
     rootCmd.Flags().BoolP("verbose", "v", false, "log every change")
+    rootCmd.Flags().String("remote", "", "remote WebDAV base URL")
+    rootCmd.Flags().String("remote-user", "admin", "remote WebDAV username")
+    rootCmd.Flags().String("remote-pass", "admin", "remote WebDAV password")
+    rootCmd.Flags().Bool("remote-insecure", false, "skip TLS verification for remote WebDAV")
 
     if (err = rootCmd.Execute())
       log.Fatal().Err(err).Msg("openvfs")

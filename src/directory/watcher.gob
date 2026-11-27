@@ -25,6 +25,8 @@ module Directory
         return "Rescan"
       when Poll
         return "Poll"
+      when LocalEntry
+        return "LocalEntry"
       end
 
       return "Unknown"
@@ -40,6 +42,8 @@ module Directory
   const :Rescan, 32
   # Poll is a scheduled rescan request.
   const :Poll, 64
+  # LocalEntry is a file discovered during a local scan.
+  const :LocalEntry, 128
 
   def fromFsnotify(op) # (fsnotify.Op) -> EventKind
     if op.Has(fsnotify.Create)

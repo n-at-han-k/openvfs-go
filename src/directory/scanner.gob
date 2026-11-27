@@ -1,0 +1,105 @@
+require "io/fs"
+require "os"
+require "path/filepath"
+require "syscall"
+
+require "example.com/project/src/journal"
+require "github.com/rs/zerolog/log"
+
+module Directory
+  class Scanner
+    attr_accessor :root, string
+    attr_accessor :ignored, Proc[string, [bool]]
+    attr_accessor :journal, @@journal.Journal
+
+    def Scan(onChange) # (func(Event)) -> error
+      seen = make(Hash[string, bool])
+
+      err = filepath.WalkDir(self.root, lambda { |path, d, err| # (string, fs.DirEntry, error) -> error
+        if err
+          return err
+        end
+
+        rel, err = filepath.Rel(self.root, path)
+        if err
+          return err
+        end
+
+        rel = filepath.ToSlash(rel)
+
+        if rel == "."
+          return nil
+        end
+
+        if self.ignored != nil && self.ignored(rel)
+          if d.IsDir()
+            return filepath.SkipDir
+          end
+
+          return nil
+        end
+
+        if d.IsDir()
+          return nil
+        end
+
+        info, err = d.Info()
+        if err
+          return err
+        end
+
+        seen[rel] = true
+
+        if onChange != nil
+          onChange(Event.new(Kind: LocalEntry, Path: rel))
+        end
+
+        inode = InodeOf(info)
+
+        if (err = self.journal.Record(rel, inode, info.ModTime().Unix(), info.Size()))
+          log.Warn().Err(err).Str("path", rel).Msg("record")
+        end
+
+        return nil
+      })
+
+      if err
+        return err
+      end
+
+      paths, err = self.journal.Paths()
+      if err
+        return err
+      end
+
+      paths.each do |_, p|
+        if (_, ok = seen[p])
+          next
+        end
+
+        if self.ignored != nil && self.ignored(p)
+          next
+        end
+
+        if (err = self.journal.Forget(p))
+          log.Warn().Err(err).Str("path", p).Msg("forget")
+        end
+      end
+
+      return nil
+    end
+  end
+
+  def NewScanner(root, ignored, db) # (string, func(string) bool, *journal.Journal) -> *Scanner
+    return @Scanner.new(root: root, ignored: ignored, journal: db)
+  end
+
+  # InodeOf is the file's inode, or 0 where the platform does not report one.
+  def InodeOf(st) # (os.FileInfo) -> uint64
+    if (sys, ok = st.Sys().(@@syscall.Stat_t))
+      return uint64(sys.Ino)
+    end
+
+    return 0
+  end
+end

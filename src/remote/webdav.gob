@@ -1,0 +1,34 @@
+require "context"
+require "crypto/tls"
+require "net/http"
+
+require "github.com/migadu/go-webdav"
+
+module Remote
+  # Client wraps a WebDAV client for listing remote directories.
+  class Client
+    attr_accessor :endpoint, string
+    attr_accessor :wc, @@webdav.Client
+
+    # List returns the entries in dir (Depth 1), relative to the endpoint.
+    def List(ctx, dir) # (context.Context, string) -> ([]webdav.FileInfo, error)
+      return self.wc.ReadDir(ctx, dir, false)
+    end
+  end
+
+  # NewClient creates a WebDAV client with basic auth.
+  def NewClient(endpoint, username, password, insecure) # (string, string, string, bool) -> (*Client, error)
+    httpClient = http.DefaultClient
+    if insecure
+      httpClient = @http.Client.new(Transport: @http.Transport.new(TLSClientConfig: @tls.Config.new(InsecureSkipVerify: true)))
+    end
+
+    hc = webdav.HTTPClientWithBasicAuth(httpClient, username, password)
+    wc, err = webdav.NewClient(hc, endpoint)
+    if err
+      return nil, err
+    end
+
+    return @Client.new(endpoint: endpoint, wc: wc), nil
+  end
+end
