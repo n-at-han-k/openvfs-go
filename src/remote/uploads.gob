@@ -5,6 +5,7 @@ require "net/url"
 require "os"
 require "path/filepath"
 require "sync"
+require "time"
 
 require "example.com/project/src/journal"
 require "example.com/project/src/vfs"
@@ -113,8 +114,7 @@ module Remote
       end
 
       if st.IsDir()
-        if (err = self.client.Mkdir(ctx, rel))
-          # may already exist
+        if (err = self.client.MkdirAll(ctx, rel))
           _, statErr = self.client.Stat(ctx, rel)
           if statErr != nil
             return err
@@ -130,16 +130,60 @@ module Remote
         return nil
       end
 
-      f, err = os.Open(abs)
-      if err
-        return err
+      parent = filepath.Dir(rel)
+      if parent != "." && parent != ""
+        if (err = self.client.MkdirAll(ctx, parent))
+          log.Warn().Err(err).Str("path", parent).Msg("upload mkdirall")
+        end
       end
-      defer f.Close()
 
       baseURL, err = url.Parse(self.client.endpoint)
       if err
         return err
       end
+
+      var :lastErr, error
+      attempt = 0
+      loop do
+        if ctx.Err() != nil
+          return ctx.Err()
+        end
+
+        if attempt >= 3
+          if lastErr != nil
+            return lastErr
+          end
+
+          return fmt.Errorf("upload failed: %s", rel)
+        end
+
+        attempt = attempt + 1
+        lastErr = self.uploadFileOnce(ctx, rel, abs, st, baseURL)
+        if lastErr == nil
+          return nil
+        end
+
+        if !tusgo.IsErrorRetryable(lastErr)
+          return lastErr
+        end
+
+        log.Warn().Err(lastErr).Str("path", rel).Int("attempt", attempt).Msg("upload retry")
+        t = time.NewTimer(time.Duration(attempt) * time.Second)
+        case
+        when ←.ctx.Done()
+          t.Stop()
+          return ctx.Err()
+        when ←.t.C
+        end
+      end
+    end
+
+    def uploadFileOnce(ctx, rel, abs, st, baseURL) # (context.Context, string, string, os.FileInfo, *url.URL) -> error
+      f, err = os.Open(abs)
+      if err
+        return err
+      end
+      defer f.Close()
 
       cl = tusgo.NewClient(baseURL)
       cl.Client = self.client.hc
@@ -181,16 +225,27 @@ module Remote
         return fmt.Errorf("tus flush: %w", err)
       end
 
-      # Refresh remote metadata
+      self.recordRemoteSynced(ctx, rel, st)
+      return nil
+    end
+
+    def recordRemoteSynced(ctx, rel, st) # (context.Context, string, os.FileInfo)
       entry, statErr = self.client.Stat(ctx, rel)
       if statErr == nil
         _ = self.journal.RecordRemote(rel, entry.ETag, entry.FileID, entry.Size, false, int64(0))
         _ = self.journal.SetSynced(rel, vfs.StateHydrated, vfs.PinInherited, entry.ETag, entry.FileID, entry.Size, st.ModTime().Unix(), st.Size())
-      else
-        _ = self.journal.SetSynced(rel, vfs.StateHydrated, vfs.PinInherited, "", "", st.Size(), st.ModTime().Unix(), st.Size())
+        return
       end
 
-      return nil
+      # Fallback to plain webdav stat if custom PROPFIND parsing fails.
+      info, err = self.client.wc.Stat(ctx, rel)
+      if err == nil
+        _ = self.journal.RecordRemote(rel, info.ETag, "", info.Size, info.IsDir, int64(0))
+        _ = self.journal.SetSynced(rel, vfs.StateHydrated, vfs.PinInherited, info.ETag, "", info.Size, st.ModTime().Unix(), st.Size())
+        return
+      end
+
+      _ = self.journal.SetSynced(rel, vfs.StateHydrated, vfs.PinInherited, "", "", st.Size(), st.ModTime().Unix(), st.Size())
     end
 
     def markSynced(rel, st) # (string, os.FileInfo) -> error

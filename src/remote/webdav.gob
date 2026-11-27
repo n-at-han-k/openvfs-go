@@ -94,6 +94,39 @@ module Remote
       return self.wc.Mkdir(ctx, p)
     end
 
+    def MkdirAll(ctx, p) # (context.Context, string) -> error
+      clean = strings.Trim(strings.TrimSpace(p), "/")
+      if clean == "" || clean == "."
+        return nil
+      end
+
+      parts = strings.Split(clean, "/")
+      cur = ""
+      parts.each do |_, part|
+        if part == "" || part == "."
+          next
+        end
+
+        if cur == ""
+          cur = part
+        else
+          cur = cur + "/" + part
+        end
+
+        err = self.wc.Mkdir(ctx, cur)
+        if err != nil
+          _, statErr = self.Stat(ctx, cur)
+          if statErr == nil
+            next
+          end
+
+          return err
+        end
+      end
+
+      return nil
+    end
+
     def RemoveAll(ctx, p) # (context.Context, string) -> error
       return self.wc.RemoveAll(ctx, p)
     end
