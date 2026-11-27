@@ -16,7 +16,7 @@ end
 desc "Default: build"
 task default: [:build]
 
-desc "build"
+desc "Transpile every .gob source into #{BUILD_DIR}/ and compile it"
 task :build do
   FileUtils.rm_rf(BUILD_DIR)
   FileUtils.mkdir_p(BUILD_DIR)
@@ -24,11 +24,18 @@ task :build do
   sh "#{GOB} transpile packages -o ./#{BUILD_DIR}/packages"
   FileUtils.cp("go.mod", "#{BUILD_DIR}/go.mod")
   FileUtils.cp("go.sum", "#{BUILD_DIR}/go.sum")
-  FileUtils.mkdir_p("#{BUILD_DIR}/packages/openvfs/unix")
-  FileUtils.cp("packages/openvfs/unix/config.json", "#{BUILD_DIR}/packages/openvfs/unix/config.json")
   cd BUILD_DIR do
-    sh "go run ./src/main.go --root ../tmp"
+    sh "go build -o openvfs ./src"
   end
+end
+
+desc "Build, then mount ROOT at MOUNTPOINT (defaults under tmp/)"
+task run: [:build] do
+  root = ENV.fetch("ROOT", "tmp/root")
+  mountpoint = ENV.fetch("MOUNTPOINT", "tmp/mnt")
+  FileUtils.mkdir_p(root)
+  FileUtils.mkdir_p(mountpoint)
+  sh "./#{BUILD_DIR}/openvfs #{Pathname.new(root).expand_path} #{Pathname.new(mountpoint).expand_path}"
 end
 
 desc "Transpile every .gob source into #{BUILD_DIR}/"

@@ -21,10 +21,8 @@ module Directory
         return "Rename"
       when Chmod
         return "Chmod"
-      when Poll
-        return "Poll"
-      when LocalEntry
-        return "LocalEntry"
+      when Rescan
+        return "Rescan"
       end
 
       return "Unknown"
@@ -36,8 +34,8 @@ module Directory
   const :Remove, 4
   const :Rename, 8
   const :Chmod, 16
-  const :Poll, 32
-  const :LocalEntry, 64
+  # Rescan means events were dropped, so the root has to be walked again.
+  const :Rescan, 32
 
   def fromFsnotify(op) # (fsnotify.Op) -> EventKind
     if op.Has(fsnotify.Create)
@@ -55,19 +53,18 @@ module Directory
     return 0
   end
 
+  # Event is one change under the root. Path is relative to the root, in slash
+  # form; it is empty on a Rescan.
   var Event = Struct.new(
     Kind: EventKind,
-    Path: string,
-    Local: LocalInfo
+    Path: string
   )
 
   class Watcher
     attr_accessor :root, string
     attr_accessor :w, @@fsnotify.Watcher
-    # func(string) bool
-    attr_accessor :ignoredFn, Proc
-    # func(Event)
-    attr_accessor :onChange, Proc
+    attr_accessor :ignoredFn, Proc[string, [bool]]
+    attr_accessor :onChange, Proc[Event]
     attr_accessor :watched, Hash[string, Struct[]]
 
     def run(ctx) # (context.Context)
@@ -75,19 +72,11 @@ module Directory
         case
         when ctx.Done().<<
           return
-        when ev, ok = self.w.Events.<<
-          unless ok
-            return
-          end
-
+        when ev = self.w.Events.<<
           self.onEvent(ev)
-        when err, ok = self.w.Errors.<<
-          unless ok
-            return
-          end
-
+        when err = self.w.Errors.<<
           log.Warn().Err(err).Msg("fsnotify")
-          self.onChange(Event.new(Kind: Poll))
+          self.onChange(Event.new(Kind: Rescan))
         end
       end
     end
@@ -110,13 +99,15 @@ module Directory
         end
       end
 
+      # A new directory has to be watched too, and its contents may already
+      # have appeared before the watch landed.
       if ev.Op & (fsnotify.Create | fsnotify.Write) != 0
         st, err = os.Stat(ev.Name)
 
         if err == nil && st.IsDir()
           if (err = self.addTree(ev.Name))
             log.Warn().Err(err).Msgf("watch %s", ev.Name)
-            self.onChange(Event.new(Kind: Poll))
+            self.onChange(Event.new(Kind: Rescan))
           end
         end
       end
@@ -185,6 +176,8 @@ module Directory
     end
   end
 
+  # RunWatcher watches root and every directory under it until ctx is
+  # cancelled, reporting each change through onChange.
   def RunWatcher(ctx, root, ignored, onChange) # context.Context, string, func(string) bool, func(Event)
     w, err = fsnotify.NewWatcher()
     if err

@@ -1,629 +1,60 @@
+# Package journal is the sync journal: a SQLite database recording what the
+# service knows about each file under the sync root.
+
 require "database/sql"
-require "fmt"
 require "os"
 require "path/filepath"
-require "strings"
+
+require "modernc.org/sqlite", _
 
 module Journal
-  var columnPatch = Struct.new(name: string, ddl: string)
+  CREATE_FILES_TABLE = "CREATE TABLE IF NOT EXISTS files (" +
+    "path TEXT PRIMARY KEY, " +
+    "inode INTEGER, " +
+    "modtime INTEGER, " +
+    "size INTEGER, " +
+    "etag TEXT, " +
+    "fileid TEXT)"
+
+  RECORD_FILE_QUERY = "INSERT INTO files (path, inode, modtime, size) VALUES (?, ?, ?, ?) " +
+    "ON CONFLICT(path) DO UPDATE SET inode = excluded.inode, " +
+    "modtime = excluded.modtime, size = excluded.size"
+
+  # The inode index is what makes a rename cheap to spot: the same inode under
+  # a new path is a move, not a delete followed by a create.
+  CREATE_INODE_INDEX = "CREATE INDEX IF NOT EXISTS files_inode ON files (inode)"
+
+  PATH_BY_INODE_QUERY = "SELECT path FROM files WHERE inode = ? LIMIT 1"
+
+  FORGET_FILE_QUERY = "DELETE FROM files WHERE path = ?"
 
   class Journal
     attr_accessor :db, @@sql.DB
-    attr_accessor :etagStorageFilter, Array[string]
-    attr_accessor :checksumTypeCache, Hash[ChecksumAlgorithm, int]
-    attr_accessor :metadataTableIsEmpty, bool
+    attr_accessor :Files, @@Table
 
-    def createTables # () -> error
-      Array[string].new(
-        CREATE_METADATA_TABLE,
-        CREATE_DOWNLOAD_INFO_TABLE,
-        CREATE_UPLOAD_INFO_TABLE,
-        CREATE_BLACKLIST_TABLE,
-        CREATE_SELECTIVE_SYNC_TABLE,
-        CREATE_CHECKSUM_TYPE_TABLE,
-        CREATE_CONFLICTS_TABLE,
-        CREATE_VERSION_TABLE
-      ).each do |_, stmt|
-        if (_, err = self.db.Exec(stmt))
-          return fmt.Errorf("%s: %w", stmt, err)
-        end
-      end
-
-      if (err = self.updateMetadataTableStructure())
-        return err
-      end
-
-      if (err = self.updateErrorBlacklistTableStructure())
-        return err
-      end
-
-      if (_, err = self.addColumnIfMissing("conflicts", "basePath", ADD_CONFLICTS_BASE_PATH))
-        return err
-      end
-
-      Array[Array[string]].new(metadataIndexes, blacklistIndexes).each do |_, stmt|
-        stmt.each do |_, index|
-          if (_, err = self.db.Exec(index))
-            return fmt.Errorf("%s: %w", index, err)
-          end
-        end
-      end
-
-      return nil
-    end
-
-    def addColumnIfMissing(table, column, ddl) # (string, string, string) -> (bool, error)
-      rows, err = self.db.Query("PRAGMA table_info(" + table + ")")
-      if err
-        return false, err
-      end
-
-      defer rows.Close()
-
-      while rows.Next()
-        var :cid, int
-        var :notnull, int
-        var :pk, int
-        var :name, string
-        var :typ, string
-        var :dflt, sql.NullString
-
-        if (err = rows.Scan(@cid, @name, @typ, @notnull, @dflt, @pk))
-          return false, err
-        end
-
-        if name == column
-          return false, nil
-        end
-      end
-
-      if (err = rows.Err())
-        return false, err
-      end
-
-      if (_, err = self.db.Exec(ddl))
-        return false, fmt.Errorf("%s: %w", ddl, err)
-      end
-
-      return true, nil
-    end
-
-    def updateMetadataTableStructure # () -> error
-      metadataColumns.each do |_, c|
-        added, err = self.addColumnIfMissing("metadata", c.name, c.ddl)
-        if err
-          return err
-        end
-
-        if added && c.name == "fileid"
-          if (_, err = self.db.Exec("CREATE INDEX metadata_file_id ON metadata(fileid);"))
-            return err
-          end
-        end
-
-        if added && c.name == "hasDirtyPlaceholder"
-          if (_, err = self.db.Exec("CREATE INDEX hasDirtyPlaceholderIndex ON metadata(path) WHERE hasDirtyPlaceholder=TRUE;"))
-            return err
-          end
-        end
-      end
-
-      return nil
-    end
-
-    def updateErrorBlacklistTableStructure # () -> error
-      blacklistColumns.each do |_, c|
-        if (_, err = self.addColumnIfMissing("blacklist", c.name, c.ddl))
-          return err
-        end
-      end
-
-      return nil
-    end
-
-    # metadata — the file record table
-
-    def FileRecordCount # () -> (int, error)
-      var :count, int
-      err = self.db.QueryRow("SELECT COUNT(*) FROM metadata").Scan(@count)
-
-      return count, err
-    end
-
-    def AvoidReadFromDbOnNextSync(path) # (string) -> error
-      const :q, `UPDATE metadata SET md5='_invalid_' WHERE ` +
-        `(?1 == path OR (?1 > (path||'/') AND ?1 < (path||'0'))) AND type == 2;`
-
-      if (_, err = self.db.Exec(q, path))
-        return err
-      end
-
-      self.etagStorageFilter = append(self.etagStorageFilter, path + "/")
-
-      return nil
-    end
-
-    def ClearEtagStorageFilter # ()
-      self.etagStorageFilter = nil
-    end
-
-    def SetFileRecord(record) # (SyncJournalFileRecord) -> error
-      etag = record.Etag
-
-      if len(self.etagStorageFilter) > 0
-        prefix = record.Path + "/"
-
-        self.etagStorageFilter.each do |_, it|
-          if strings.HasPrefix(it, prefix)
-            etag = "_invalid_"
-            break
-          end
-        end
-      end
-
-      checksumHeader = ParseChecksumHeader(record.ChecksumHeader)
-      contentChecksumTypeID = self.mapChecksumType(checksumHeader.Type())
-
-      if (_, err = self.db.Exec(SET_FILE_RECORD_QUERY,
-        int64(PHash(record.Path)),
-        record.Path,
-        int64(record.Inode),
-        record.ModTime,
-        int64(record.Type),
-        etag,
-        record.FileID,
-        record.RemotePerm.ToDbValue(),
-        record.FileSize,
-        record.ServerHasIgnoredFiles,
-        checksumHeader.Checksum(),
-        contentChecksumTypeID,
-        record.HasDirtyPlaceholder))
-        return err
-      end
-
-      self.metadataTableIsEmpty = false
-
-      return nil
-    end
-
-    def queryRecords(query, args) # (string, ...any) -> ([]SyncJournalFileRecord, error)
-      rows, err = self.db.Query(query, *args)
-      if err
-        return nil, err
-      end
-
-      defer rows.Close()
-
-      var :out, Array[SyncJournalFileRecord]
-
-      while rows.Next()
-        rec, err = scanFileRecord(rows)
-        if err
-          return nil, err
-        end
-
-        out = append(out, rec)
-      end
-
-      return out, rows.Err()
-    end
-
-    def Records # () -> (map[string]SyncJournalFileRecord, error)
-      out = make(Hash[string, SyncJournalFileRecord])
-
-      if self.metadataTableIsEmpty
-        return out, nil
-      end
-
-      all, err = self.queryRecords(GET_ALL_FILES_QUERY)
-      if err
-        return nil, err
-      end
-
-      all.each do |_, rec|
-        if rec.Path == ""
-          next
-        end
-
-        out[rec.Path] = rec
-      end
-
-      return out, nil
-    end
-
-    def FileRecord(filename) # (string) -> (SyncJournalFileRecord, error)
-      if filepath.IsAbs(filename)
-        return SyncJournalFileRecord.new(), fmt.Errorf("FileRecord: %q is absolute", filename)
-      end
-
-      if self.metadataTableIsEmpty || filename == ""
-        return SyncJournalFileRecord.new(), nil
-      end
-
-      rec, err = scanFileRecord(self.db.QueryRow(GET_FILE_RECORD_QUERY, int64(PHash(filename))))
-
-      if err == sql.ErrNoRows
-        return SyncJournalFileRecord.new(), nil
-      end
-
-      return rec, err
-    end
-
-    def FileRecordByInode(inode) # (uint64) -> (SyncJournalFileRecord, error)
-      if inode == 0 || self.metadataTableIsEmpty
-        return SyncJournalFileRecord.new(), nil
-      end
-
-      rec, err = scanFileRecord(self.db.QueryRow(GET_FILE_RECORD_BY_INODE, int64(inode)))
-
-      if err == sql.ErrNoRows
-        return SyncJournalFileRecord.new(), nil
-      end
-
-      return rec, err
-    end
-
-    def FileRecordsByFileID(fileID) # (string) -> ([]SyncJournalFileRecord, error)
-      if fileID == "" || self.metadataTableIsEmpty
-        return nil, nil
-      end
-
-      return self.queryRecords(GET_FILE_RECORDS_BY_FILE_ID, fileID)
-    end
-
-    def ListFilesInPath(path) # (string) -> ([]SyncJournalFileRecord, error)
-      if self.metadataTableIsEmpty
-        return nil, nil
-      end
-
-      return self.queryRecords(LIST_FILES_IN_PATH_QUERY, int64(PHash(path)))
-    end
-
-    def DirtyPlaceholders # () -> ([]SyncJournalFileRecord, error)
-      if self.metadataTableIsEmpty
-        return nil, nil
-      end
-
-      return self.queryRecords(GET_DIRTY_PLACEHOLDERS)
-    end
-
-    def DeleteRecord(path) # (string) -> error
-      _, err = self.db.Exec(DELETE_FILE_RECORD_QUERY, int64(PHash(path)))
+    # Record stores what is now known about path, which is relative to the
+    # sync root.
+    def Record(path, inode, modtime, size) # (string, uint64, int64, int64) -> error
+      _, err = self.Files.Exec(RECORD_FILE_QUERY, path, inode, modtime, size)
 
       return err
     end
 
-    # checksumtype — the checksum type table
+    # PathByInode returns the path last recorded for inode, which is how a
+    # rename is told apart from a delete and a create.
+    def PathByInode(inode) # (uint64) -> (string, bool)
+      var :path, string
 
-    def mapChecksumType(checksumType) # (ChecksumAlgorithm) -> int
-      if checksumType == ChecksumParseError || checksumType == ChecksumNone
-        return 0
+      if (err = self.Files.QueryRow(PATH_BY_INODE_QUERY, inode).Scan(@path))
+        return "", false
       end
 
-      if (id, ok = self.checksumTypeCache[checksumType])
-        return id
-      end
-
-      typeName = checksumType.String()
-
-      if (_, err = self.db.Exec("INSERT OR IGNORE INTO checksumtype (name) VALUES (?1)", typeName))
-        return 0
-      end
-
-      var :id, int
-
-      if (err = self.db.QueryRow("SELECT id FROM checksumtype WHERE UPPER(name)=?1", typeName).Scan(@id))
-        return 0
-      end
-
-      self.checksumTypeCache[checksumType] = id
-
-      return id
+      return path, true
     end
 
-    # downloadinfo
-
-    def DownloadInfo(path) # (string) -> (DownloadInfo, error)
-      var :out, DownloadInfo
-      var :tmp, sql.NullString
-      var :etag, sql.NullString
-      var :count, sql.NullInt64
-
-      err = self.db.QueryRow(GET_DOWNLOAD_INFO_QUERY, path).Scan(@tmp, @etag, @count)
-
-      if err == sql.ErrNoRows
-        return out, nil
-      end
-
-      if err
-        return out, err
-      end
-
-      out = DownloadInfo.new(
-        TmpFile: tmp.String,
-        Etag: etag.String,
-        ErrorCount: int(count.Int64),
-        Valid: true
-      )
-
-      return out, nil
-    end
-
-    def SetDownloadInfo(path, info) # (string, DownloadInfo) -> error
-      unless info.Valid
-        return self.DeleteDownloadInfo(path)
-      end
-
-      _, err = self.db.Exec(SET_DOWNLOAD_INFO_QUERY, path, info.TmpFile, info.Etag, info.ErrorCount)
-
-      return err
-    end
-
-    def DeleteDownloadInfo(path) # (string) -> error
-      _, err = self.db.Exec(DELETE_DOWNLOAD_INFO_QUERY, path)
-
-      return err
-    end
-
-    def AllDownloadInfos # () -> ([]DownloadInfoWithPath, error)
-      rows, err = self.db.Query(GET_ALL_DOWNLOAD_INFO_QUERY)
-      if err
-        return nil, err
-      end
-
-      defer rows.Close()
-
-      var :out, Array[DownloadInfoWithPath]
-
-      while rows.Next()
-        var :tmp, sql.NullString
-        var :etag, sql.NullString
-        var :path, sql.NullString
-        var :count, sql.NullInt64
-
-        if (err = rows.Scan(@tmp, @etag, @count, @path))
-          return nil, err
-        end
-
-        out = append(out, DownloadInfoWithPath.new(
-          DownloadInfo: DownloadInfo.new(
-            TmpFile: tmp.String,
-            Etag: etag.String,
-            ErrorCount: int(count.Int64),
-            Valid: true
-          ),
-          Path: path.String
-        ))
-      end
-
-      return out, rows.Err()
-    end
-
-    # uploadinfo
-
-    def UploadInfo(path) # (string) -> (UploadInfo, error)
-      var :out, UploadInfo
-      var :size, sql.NullInt64
-      var :modtime, sql.NullInt64
-      var :checksum, sql.NullString
-      var :url, sql.NullString
-
-      err = self.db.QueryRow(GET_UPLOAD_INFO_QUERY, path).Scan(@size, @modtime, @checksum, @url)
-
-      if err == sql.ErrNoRows
-        return out, nil
-      end
-
-      if err
-        return out, err
-      end
-
-      out = UploadInfo.new(
-        Size: size.Int64,
-        ModTime: modtime.Int64,
-        ContentChecksum: checksum.String,
-        URL: url.String,
-        Path: path,
-        Valid: true
-      )
-
-      return out, nil
-    end
-
-    def SetUploadInfo(path, info) # (string, UploadInfo) -> error
-      unless info.Valid
-        _, err = self.db.Exec(`DELETE FROM uploadinfo WHERE path=?1`, path)
-
-        return err
-      end
-
-      _, err = self.db.Exec(SET_UPLOAD_INFO_QUERY, path, info.Size, info.ModTime, info.ContentChecksum, info.URL)
-
-      return err
-    end
-
-    def AllUploadInfos # () -> ([]UploadInfo, error)
-      rows, err = self.db.Query(GET_ALL_UPLOAD_INFO_QUERY)
-      if err
-        return nil, err
-      end
-
-      defer rows.Close()
-
-      var :out, Array[UploadInfo]
-
-      while rows.Next()
-        var :size, sql.NullInt64
-        var :modtime, sql.NullInt64
-        var :checksum, sql.NullString
-        var :path, sql.NullString
-        var :url, sql.NullString
-
-        if (err = rows.Scan(@size, @modtime, @checksum, @path, @url))
-          return nil, err
-        end
-
-        out = append(out, UploadInfo.new(
-          Size: size.Int64,
-          ModTime: modtime.Int64,
-          ContentChecksum: checksum.String,
-          Path: path.String,
-          URL: url.String,
-          Valid: true
-        ))
-      end
-
-      return out, rows.Err()
-    end
-
-    # blacklist
-
-    def ErrorBlacklistEntry(path) # (string) -> (BlacklistEntry, bool, error)
-      var :out, BlacklistEntry
-      var :etag, sql.NullString
-      var :errString, sql.NullString
-      var :modtime, sql.NullInt64
-      var :lastTry, sql.NullInt64
-      var :ignoreDuration, sql.NullInt64
-      var :retries, sql.NullInt64
-
-      err = self.db.QueryRow(GET_ERROR_BLACKLIST_QUERY, path).Scan(@out.Path, @etag, @modtime, @retries, @errString)
-
-      if err == sql.ErrNoRows
-        return out, false, nil
-      end
-
-      if err
-        return out, false, err
-      end
-
-      out.LastTryEtag, out.LastTryModtime = etag.String, modtime.Int64
-      out.RetryCount, out.ErrorString = int(retries.Int64), errString.String
-      out.LastTryTime, out.IgnoreDuration = lastTry.Int64, ignoreDuration.Int64
-
-      return out, true, nil
-    end
-
-    def SetErrorBlacklistEntry(e) # (BlacklistEntry) -> error
-      _, err = self.db.Exec(
-        SET_ERROR_BLACKLIST_QUERY,
-        e.Path,
-        e.LastTryEtag,
-        e.LastTryModtime,
-        e.RetryCount,
-        e.ErrorString,
-        e.LastTryTime,
-        e.IgnoreDuration,
-        e.RenameTarget,
-        e.ErrorCategory,
-        e.RequestID
-      )
-
-      return err
-    end
-
-    def DeleteErrorBlacklistEntry(path) # (string) -> error
-      _, err = self.db.Exec(DELETE_ERROR_BLACKLIST_QUERY, path)
-
-      return err
-    end
-
-    # conflicts
-
-    def ConflictRecord(path) # (string) -> (ConflictRecord, bool, error)
-      var :out, ConflictRecord
-      var :id, sql.NullString
-      var :etag, sql.NullString
-      var :basePath, sql.NullString
-      var :modtime, sql.NullInt64
-
-      err = self.db.QueryRow(GET_CONFLICT_RECORD_QUERY, path).Scan(@id, @modtime, @etag, @basePath)
-
-      if err == sql.ErrNoRows
-        return out, false, nil
-      end
-
-      if err
-        return out, false, err
-      end
-
-      out = ConflictRecord.new(
-        Path: path,
-        BaseFileID: id.String,
-        BaseEtag: etag.String,
-        BaseModtime: modtime.Int64,
-        BasePath: basePath.String
-      )
-
-      return out, true, nil
-    end
-
-    def SetConflictRecord(r) # (ConflictRecord) -> error
-      _, err = self.db.Exec(SET_CONFLICT_RECORD_QUERY, r.Path, r.BaseFileID, r.BaseModtime, r.BaseEtag, r.BasePath)
-
-      return err
-    end
-
-    def DeleteConflictRecord(path) # (string) -> error
-      _, err = self.db.Exec(DELETE_CONFLICT_QUERY, path)
-
-      return err
-    end
-
-    # selectivesync
-
-    def SetSelectiveSync(path, typ) # (string, int) -> error
-      _, err = self.db.Exec(SET_SELECTIVE_SYNC_QUERY, path, typ)
-
-      return err
-    end
-
-    def SelectiveSync(typ) # (int) -> ([]string, error)
-      rows, err = self.db.Query(GET_SELECTIVE_SYNC_QUERY, typ)
-      if err
-        return nil, err
-      end
-
-      defer rows.Close()
-
-      var :out, Array[string]
-
-      while rows.Next()
-        var :path, string
-
-        if (err = rows.Scan(@path))
-          return nil, err
-        end
-
-        out = append(out, path)
-      end
-
-      return out, rows.Err()
-    end
-
-    # version
-
-    def Version # () -> (Version, error)
-      var :out, Version
-      var :custom, sql.NullString
-
-      err = self.db.QueryRow(GET_VERSION_QUERY).Scan(@out.Major, @out.Minor, @out.Patch, @custom)
-
-      if err == sql.ErrNoRows
-        return out, nil
-      end
-
-      if err
-        return out, err
-      end
-
-      out.Custom = custom.String
-
-      return out, nil
-    end
-
-    def SetVersion(v) # (Version) -> error
-      _, err = self.db.Exec(SET_VERSION_QUERY, v.Major, v.Minor, v.Patch, v.Custom)
+    # Forget drops path, which is no longer on disk.
+    def Forget(path) # (string) -> error
+      _, err = self.Files.Exec(FORGET_FILE_QUERY, path)
 
       return err
     end
@@ -633,12 +64,14 @@ module Journal
     end
   end
 
+  # Open opens the journal at path, creating the file and its tables if they are
+  # not there yet.
   def Open(path) # (string) -> (*Journal, error)
     if (err = os.MkdirAll(filepath.Dir(path), 0755))
       return nil, err
     end
 
-    dsn = "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)"
+    dsn = "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)"
 
     db, err = sql.Open("sqlite", dsn)
     if err
@@ -647,21 +80,18 @@ module Journal
 
     db.SetMaxOpenConns(1)
 
-    j = @Journal.new(db: db, checksumTypeCache: make(Hash[ChecksumAlgorithm, int]))
+    files = @Table.new(db: db, name: "files", createSQL: CREATE_FILES_TABLE)
 
-    if (err = j.createTables())
+    if (err = files.Create())
       _ = db.Close()
       return nil, err
     end
 
-    count, err = j.FileRecordCount()
-    if err
+    if (_, err = files.Exec(CREATE_INODE_INDEX))
       _ = db.Close()
       return nil, err
     end
 
-    j.metadataTableIsEmpty = count == 0
-
-    return j, nil
+    return @Journal.new(db: db, Files: files), nil
   end
 end

@@ -2,111 +2,117 @@ require "context"
 require "os"
 require "os/signal"
 require "path/filepath"
-require "strings"
 require "syscall"
 require "time"
 
 require "example.com/project/packages/openvfs"
 require "example.com/project/src/directory"
 require "example.com/project/src/journal"
-require "github.com/knadh/koanf/parsers/yaml"
-require "github.com/knadh/koanf/providers/env"
-require "github.com/knadh/koanf/providers/file"
-require "github.com/knadh/koanf/v2"
 require "github.com/rs/zerolog"
 require "github.com/rs/zerolog/log"
 require "github.com/spf13/cobra"
 
 module Main
-  var k = koanf.New(".")
-
-  def loadConfig(configPath) # (string)
-    if configPath != ""
-      if (err = k.Load(file.Provider(configPath), yaml.Parser()))
-        log.Warn().Err(err).Msgf("load config %s", configPath)
-      end
-    end
-
-    k.Load(env.Provider("OPENVFS_", ".", lambda { |s| # (string) -> string
-      return strings.ReplaceAll(strings.ToLower(strings.TrimPrefix(s, "OPENVFS_")), "_", ".")
-    }), nil)
-  end
-
-  def run(root, dbPath, socketPath) # (string, string, string)
-    ignored = lambda { |rel| # (string) -> bool
-      return rel == dbPath || rel == dbPath + "-wal" || rel == dbPath + "-shm"
-    }
-
+  # run opens the journal, mounts root at mountpoint, watches root and serves
+  # until the process is interrupted.
+  def run(root, mountpoint, dbPath) # (string, string, string) -> error
     ctx, cancel = signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
     defer cancel()
 
-    events = make(Chan[directory.Event], 256)
-
-    journal, err = journal.Open(filepath.Join(root, dbPath))
+    j, err = journal.Open(dbPath)
     if err
-      log.Fatal().Err(err).Msg("open journal")
+      return err
     end
 
-    defer journal.Close()
+    defer j.Close()
 
-    syncer = directory.NewSyncer(root, ignored, journal, lambda { |event| # (directory.Event)
-      case
-      when events << event
-      when ctx.Done().<<
-      end
-    })
+    log.Info().Str("db", dbPath).Msg("journal ready")
 
-    go syncer.Run(ctx)
+    # The journal lives under the root, so its own writes have to be ignored or
+    # recording a change would trigger the next one.
+    dbName = filepath.Base(dbPath)
 
-    if (err = openvfs.ServeAPI(ctx, socketPath, lambda { |event| # (directory.Event)
-      case
-      when events << event
-      when ctx.Done().<<
-      end
-    }))
-      log.Fatal().Err(err).Msg("serve api")
-    end
+    ignored = lambda { |rel| # (string) -> bool
+      base = filepath.Base(rel)
 
-    go openvfs.Run(ctx, root, "openvfs:local", socketPath, lambda { |event| # (directory.Event)
-      case
-      when events << event
-      when ctx.Done().<<
-      end
-    })
+      return base == dbName || base == dbName + "-wal" || base == dbName + "-shm"
+    }
 
     go directory.RunWatcher(ctx, root, ignored, lambda { |event| # (directory.Event)
-      case
-      when events << event
-      when ctx.Done().<<
-      end
+      record(j, root, event)
     })
 
-    go directory.RunPoller(ctx, 30 * time.Second, lambda { |event| # (directory.Event)
-      case
-      when events << event
-      when ctx.Done().<<
-      end
-    })
+    server, err = openvfs.Mount(root, mountpoint)
+    if err
+      return err
+    end
 
-    loop do
-      case
-      when ctx.Done().<<
-        return
-      when event = events.<<
-        if event.Kind == directory.Poll
-          syncer.Request(directory.SyncRequest.new(Cause: event))
-          next
-        end
+    log.Info().Str("root", root).Str("mountpoint", mountpoint).Msg("mounted")
 
-        case event.Kind
-        when directory.Create
-        when directory.Write
-        when directory.Remove
-        when directory.Rename
-        when directory.Chmod
-        when directory.LocalEntry
+    go lambda {
+      ctx.Done().<<
+      _ = server.Unmount()
+    }.()
+
+    server.Wait()
+
+    log.Info().Msg("unmounted")
+
+    return nil
+  end
+
+  # inodeOf is the file's inode, or 0 where the platform does not report one.
+  def inodeOf(st) # (os.FileInfo) -> uint64
+    if (sys, ok = st.Sys().(@@syscall.Stat_t))
+      return uint64(sys.Ino)
+    end
+
+    return 0
+  end
+
+  # record folds one watcher event into the journal.
+  def record(j, root, event) # (*journal.Journal, string, directory.Event)
+    log.Debug().Str("kind", event.Kind.String()).Str("path", event.Path).Msg("change")
+
+    if event.Kind == directory.Rescan
+      return
+    end
+
+    if event.Kind == directory.Remove || event.Kind == directory.Rename
+      if (err = j.Forget(event.Path))
+        log.Warn().Err(err).Str("path", event.Path).Msg("forget")
+      end
+
+      return
+    end
+
+    st, err = os.Stat(filepath.Join(root, event.Path))
+    if err
+      return
+    end
+
+    if st.IsDir()
+      return
+    end
+
+    inode = inodeOf(st)
+
+    # A create whose inode is already on record is the far end of a rename, so
+    # the path it moved from goes away.
+    if event.Kind == directory.Create
+      if (old, ok = j.PathByInode(inode))
+        if old != event.Path
+          if (err = j.Forget(old))
+            log.Warn().Err(err).Str("path", old).Msg("forget")
+          end
+
+          log.Debug().Str("from", old).Str("to", event.Path).Msg("renamed")
         end
       end
+    end
+
+    if (err = j.Record(event.Path, inode, st.ModTime().Unix(), st.Size()))
+      log.Warn().Err(err).Str("path", event.Path).Msg("record")
     end
   end
 
@@ -114,55 +120,40 @@ module Main
     log.Logger = log.Output(zerolog.ConsoleWriter.new(Out: os.Stderr, TimeFormat: time.RFC3339))
 
     rootCmd = @cobra.Command.new(
-      Use: "openvfs",
-      Short: "OpenVFS sync client",
+      Use: "openvfs <root> <mountpoint>",
+      Short: "Mount a sync folder as a FUSE filesystem",
+      Args: cobra.ExactArgs(2),
       RunE: lambda { |cmd, args| # (*cobra.Command, []string) -> error
-        configPath, _ = cmd.Flags().GetString("config")
-        loadConfig(configPath)
+        verbose, _ = cmd.Flags().GetBool("verbose")
 
-        root = k.String("root")
-        if root == ""
-          root = "."
-        end
-        if len(args) > 0
-          root = args[0]
-        end
-        flagRoot, _ = cmd.Flags().GetString("root")
-        if flagRoot != ""
-          root = flagRoot
+        if verbose
+          zerolog.SetGlobalLevel(zerolog.DebugLevel)
         end
 
-        dbPath = k.String("db")
+        root, err = filepath.Abs(args[0])
+        if err
+          return err
+        end
+
+        mountpoint, err = filepath.Abs(args[1])
+        if err
+          return err
+        end
+
+        dbPath, _ = cmd.Flags().GetString("db")
         if dbPath == ""
-          dbPath = "sync-journal.db"
-        end
-        flagDB, _ = cmd.Flags().GetString("db")
-        if flagDB != ""
-          dbPath = flagDB
+          dbPath = filepath.Join(root, "sync-journal.db")
         end
 
-        socketPath = k.String("socket")
-        if socketPath == ""
-          socketPath = filepath.Join(os.TempDir(), "openvfs.sock")
-        end
-        flagSocket, _ = cmd.Flags().GetString("socket")
-        if flagSocket != ""
-          socketPath = flagSocket
-        end
-
-        log.Info().Str("root", root).Str("db", dbPath).Str("socket", socketPath).Msg("starting openvfs")
-        run(root, dbPath, socketPath)
-        return nil
+        return run(root, mountpoint, dbPath)
       }
     )
 
-    rootCmd.Flags().String("config", "", "path to config file (yaml)")
-    rootCmd.Flags().String("root", "", "sync root directory")
     rootCmd.Flags().String("db", "", "journal database path")
-    rootCmd.Flags().String("socket", "", "socket path")
+    rootCmd.Flags().BoolP("verbose", "v", false, "log every change")
 
     if (err = rootCmd.Execute())
-      log.Fatal().Err(err).Msg("command failed")
+      log.Fatal().Err(err).Msg("openvfs")
     end
   end
 end
