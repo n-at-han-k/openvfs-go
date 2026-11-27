@@ -1,0 +1,92 @@
+require "context"
+require "time"
+
+require "example.com/project/src/directory"
+require "example.com/project/src/journal"
+require "example.com/project/src/remote"
+require "example.com/project/src/vfs"
+require "github.com/rs/zerolog/log"
+
+module Main
+  class Service
+    attr_accessor :Root,       string
+    attr_accessor :Mountpoint, string
+    attr_accessor :DBPath,     string
+    attr_accessor :Owner,      string
+    attr_accessor :SocketPath, string
+
+    attr_accessor :RemoteURL,      string
+    attr_accessor :RemoteUser,     string
+    attr_accessor :RemotePass,     string
+    attr_accessor :RemoteInsecure, bool
+
+    attr_accessor :PollInterval,     time.Duration
+    attr_accessor :HydrationTimeout, time.Duration
+
+    attr_accessor :journal, @@journal.Journal
+
+    def Run(ctx) # (context.Context) -> error
+      j, err = journal.Open(self.DBPath)
+      if err
+        return err
+      end
+
+      self.journal = j
+      defer self.journal.Close()
+
+      log.Info().Str("db", self.DBPath).Msg("journal ready")
+
+      scanner = directory.NewScanner(self.Root, nil, self.journal)
+
+      var :remoteScanner, @@remote.Scanner
+      if self.RemoteURL != ""
+        rc, err = remote.NewClient(self.RemoteURL, self.RemoteUser, self.RemotePass, self.RemoteInsecure)
+        if err
+          return err
+        end
+
+        remoteScanner = remote.NewScanner(rc)
+      end
+
+      syncer = NewSyncer(scanner, self.journal, remoteScanner)
+      go syncer.Run(ctx)
+
+      socket = NewSocket(self.SocketPath)
+      go socket.RunListener(ctx, lambda { |event| # (SocketEvent)
+        case event.Kind
+        when Version
+          log.Info().Int64("pid", event.PID).Msg("desktop client")
+          socket.SetClientPID(event.PID)
+        when Hydrated
+          unless event.OK
+            log.Warn().Int("id", event.ID).Str("error", event.Error).Msg("hydrate failed")
+          end
+
+          socket.Finish(event.ID, event.OK)
+        end
+      })
+
+      syncer.Request(SyncRequest.new(Cause: directory.Event.new(Kind: directory.Rescan)))
+
+      go directory.RunWatcher(ctx, self.Root, nil, lambda { |event| # (directory.Event)
+        syncer.Request(SyncRequest.new(Cause: event))
+        scanner.Apply(event)
+      })
+
+      go directory.RunPoller(ctx, self.PollInterval, lambda { |event| # (directory.Event)
+        log.Info().Str("kind", event.Kind.String()).Msg("change")
+        syncer.Request(SyncRequest.new(Cause: event))
+      })
+
+      go vfs.RunMount(ctx, self.Root, self.Mountpoint, self.Owner, self.HydrationTimeout, lambda { |event| # (vfs.MountEvent)
+        socket.SendMessage(event)
+      })
+
+      ←.ctx.Done()
+
+      log.Info().Msg("shutting down")
+
+      return nil
+    end
+  end
+end

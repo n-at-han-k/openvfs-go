@@ -23,13 +23,6 @@ task :build do
   sh "#{GOB} transpile src -o ./#{BUILD_DIR}/src"
   FileUtils.cp("go.mod", "#{BUILD_DIR}/go.mod")
   FileUtils.cp("go.sum", "#{BUILD_DIR}/go.sum")
-  # Gob 1.5.5 drops bare-type attr_accessor (Go embedding); inject fs.Inode.
-  mount_go = "#{BUILD_DIR}/src/vfs/mount.go"
-  if File.exist?(mount_go)
-    src = File.read(mount_go)
-    src = src.sub(/type Mount struct \{\n/, "type Mount struct {\n\tfs.Inode\n")
-    File.write(mount_go, src)
-  end
   cd BUILD_DIR do
     sh "go build -o openvfs ./src"
   end
@@ -39,10 +32,11 @@ desc "Build, then mount ROOT at MOUNTPOINT (defaults under tmp/)"
 task run: [:build] do
   root = ENV.fetch("ROOT", "tmp/root")
   mountpoint = ENV.fetch("MOUNTPOINT", "tmp/mnt")
+  db = ENV.fetch("DB", "tmp/journal.db")
   remote = ENV.fetch("REMOTE", "https://localhost:18473/remote.php/dav/files/admin/")
   FileUtils.mkdir_p(root)
   FileUtils.mkdir_p(mountpoint)
-  sh "./#{BUILD_DIR}/openvfs #{Pathname.new(root).expand_path} #{Pathname.new(mountpoint).expand_path} --remote #{remote} --remote-user admin --remote-pass admin --remote-insecure"
+  sh "./#{BUILD_DIR}/openvfs #{Pathname.new(root).expand_path} #{Pathname.new(mountpoint).expand_path} --db #{Pathname.new(db).expand_path} --remote #{remote} --remote-user admin --remote-pass admin --remote-insecure"
 end
 
 desc "Transpile every .gob source into #{BUILD_DIR}/"

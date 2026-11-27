@@ -4,7 +4,7 @@ require "strconv"
 require "github.com/vmihailenco/msgpack/v5"
 
 module Vfs
-  class PlaceHolderAttributes
+  class RemoteFileInfo
     attr_accessor :AbsolutePath, string
     attr_accessor :Etag,         string
     attr_accessor :FileID,       string
@@ -20,7 +20,7 @@ module Vfs
     # RealSize is the on-disk size. When the fuse layer provides
     # user.openvfs.realsize that value wins; otherwise fall back to stat.
     def RealSize # () -> uint64
-      data, err = GetXAttr(self.AbsolutePath, XAttrRealSize)
+      data, err = LocalPath(self.AbsolutePath).GetXAttr(XAttrRealSize)
       unless err
         n, perr = strconv.ParseInt(string(data), 10, 64)
         if perr == nil
@@ -37,16 +37,16 @@ module Vfs
     end
   end
 
-  # PlaceHolderFromAttributes reads user.openvfs.data. ok is false when absent.
-  def PlaceHolderFromAttributes(path) # (string) -> (PlaceHolderAttributes, bool)
-    data, err = GetXAttr(path, XAttrData)
+  # RemoteFileInfoFromAttributes reads user.openvfs.data. ok is false when absent.
+  def RemoteFileInfoFromAttributes(path) # (string) -> (RemoteFileInfo, bool)
+    data, err = LocalPath(path).GetXAttr(XAttrData)
     if err
-      return PlaceHolderAttributes.new(), false
+      return RemoteFileInfo.new(), false
     end
 
     var :m, Hash[string, any]
     if (err = msgpack.Unmarshal(data, @m))
-      return PlaceHolderAttributes.new(), false
+      return RemoteFileInfo.new(), false
     end
 
     etag, _   = m["etag"].(string)
@@ -55,7 +55,7 @@ module Vfs
     state, _  = m["state"].(uint64)
     pin, _    = m["pinstate"].(uint64)
 
-    return PlaceHolderAttributes.new(
+    return RemoteFileInfo.new(
       AbsolutePath: path,
       Etag:         etag,
       FileID:       fileID,

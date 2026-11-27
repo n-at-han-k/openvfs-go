@@ -1,0 +1,93 @@
+require "context"
+
+require "example.com/project/src/directory"
+require "example.com/project/src/journal"
+require "example.com/project/src/remote"
+require "github.com/rs/zerolog/log"
+
+module Main
+  var SyncRequest = Struct.new(Cause: directory.Event)
+
+  var syncPhase = Struct.new(
+    Name: string,
+    Run: Proc[context.Context, [error]]
+  )
+
+  class Syncer
+    attr_accessor :scanner, @@directory.Scanner
+    attr_accessor :remote, @@remote.Scanner
+    attr_accessor :journal, @@journal.Journal
+    attr_accessor :requests, Chan[SyncRequest]
+
+    def Request(req) # (SyncRequest) -> bool
+      case
+      when self.requests.←.req
+        return true
+      else
+        return false
+      end
+    end
+
+    def Run(ctx) # (context.Context)
+      loop do
+        case
+        when ←.ctx.Done()
+          return
+        when req = ←.self.requests
+          self.sync(ctx, req)
+        end
+      end
+    end
+
+    def phases # () -> []syncPhase
+      return Array[syncPhase].new(
+        syncPhase.new(Name: "discover local", Run: self.discoverLocal),
+        syncPhase.new(Name: "discover remote", Run: self.discoverRemote),
+        syncPhase.new(Name: "reconcile", Run: self.reconcile),
+        syncPhase.new(Name: "propagate", Run: self.propagate)
+      )
+    end
+
+    def sync(ctx, req) # (context.Context, SyncRequest)
+      log.Info().Str("cause", req.Cause.Kind.String()).Msg("sync")
+
+      self.phases().each do |_, phase|
+        if (err = phase.Run(ctx))
+          log.Warn().Err(err).Str("phase", phase.Name).Msg("sync")
+          return
+        end
+
+        log.Debug().Str("phase", phase.Name).Msg("sync")
+      end
+    end
+
+    def discoverLocal(ctx) # (context.Context) -> error
+      return self.scanner.Scan(nil)
+    end
+
+    def discoverRemote(ctx) # (context.Context) -> error
+      if self.remote == nil
+        return nil
+      end
+
+      return self.remote.Scan(ctx, "", nil)
+    end
+
+    def reconcile(ctx) # (context.Context) -> error
+      return nil
+    end
+
+    def propagate(ctx) # (context.Context) -> error
+      return nil
+    end
+  end
+
+  def NewSyncer(scanner, journal, remoteScanner) # (*directory.Scanner, *journal.Journal, *remote.Scanner) -> *Syncer
+    return @Syncer.new(
+      scanner: scanner,
+      journal: journal,
+      remote: remoteScanner,
+      requests: make(Chan[SyncRequest], 1)
+    )
+  end
+end

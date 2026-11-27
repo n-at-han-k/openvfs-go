@@ -1,0 +1,183 @@
+require "context"
+require "fmt"
+require "os"
+require "syscall"
+require "time"
+
+require "github.com/hanwen/go-fuse/v2/fs"
+require "github.com/hanwen/go-fuse/v2/fuse", gofuse
+require "github.com/rs/zerolog/log"
+require "github.com/vmihailenco/msgpack/v5"
+
+module Vfs
+  const :OpenVFSVersion, 1
+
+  const :XAttrData,         "user.openvfs.data"
+  const :XAttrRealSize,     "user.openvfs.realsize"
+  const :XAttrRegistration, "user.openvfs.registration"
+
+  const :StateHydrated,   0
+  const :StateDeHydrated, 1
+  const :StateHydrating,  2
+
+  const :PinUnspecified, 0
+  const :PinOnlineOnly,  1
+  const :PinAlwaysLocal, 2
+  const :PinInherited,   3
+  const :PinExcluded,    4
+
+  var MountEventKind = Class.new(uint8) do
+    protected def String # () -> string
+      case self
+      when Hydrate
+        return "Hydrate"
+      end
+
+      return "Unknown"
+    end
+  end
+
+  const :Hydrate, 1
+
+  var MountEvent = Struct.new(
+    Kind: MountEventKind,
+    Path: string,
+    FileID: string,
+    Caller: @@FuseClient,
+    Reply: Chan[bool]
+  )
+
+  class FuseMount
+    attr_accessor :Root,       string
+    attr_accessor :Mountpoint, string
+    attr_accessor :Owner,      string
+    attr_accessor :Version,    int
+    attr_accessor :PID,        int
+    attr_accessor :Server,     @@gofuse.Server
+    attr_accessor :Timeout,    time.Duration
+    attr_accessor :onEvent,    Proc[MountEvent]
+
+    def readRegistration # () -> (string, int, error)
+      data, err = LocalPath(self.Root).GetXAttr(XAttrRegistration)
+      if err
+        return "", 0, err
+      end
+
+      var :m, Hash[string, any]
+      if (err = msgpack.Unmarshal(data, @m))
+        return "", 0, err
+      end
+
+      owner, _ = m["owner"].(string)
+      ver, _   = m["version"].(uint64)
+      return owner, int(ver), nil
+    end
+
+    def claim # () -> error
+      if self.Owner == ""
+        return nil
+      end
+
+      registered, ver, err = self.readRegistration()
+      if err != nil
+        return fmt.Errorf("mount point %s has no registration: %w", self.Root, err)
+      end
+
+      if registered != self.Owner
+        return fmt.Errorf("mount point %s is owned by %s, not %s", self.Root, registered, self.Owner)
+      end
+
+      self.Version = ver
+      return nil
+    end
+
+    def raise(ctx, event) # (context.Context, MountEvent) -> syscall.Errno
+      if self.onEvent == nil
+        return syscall.EIO
+      end
+
+      self.onEvent(event)
+
+      timer = time.NewTimer(self.Timeout)
+      defer timer.Stop()
+
+      case
+      when ok = ←.event.Reply
+        unless ok
+          return syscall.EIO
+        end
+
+        return 0
+      when ←.ctx.Done()
+        return syscall.EINTR
+      when ←.timer.C
+        return syscall.ETIMEDOUT
+      end
+    end
+  end
+
+  def NewFuseMount(root, mountpoint, owner, timeout, onEvent) # (string, string, string, time.Duration, func(MountEvent)) -> (*FuseMount, error)
+    var :st, syscall.Stat_t
+    if (err = syscall.Stat(root, @st))
+      return nil, err
+    end
+
+    m = @FuseMount.new(
+      Root:       root,
+      Mountpoint: mountpoint,
+      Owner:      owner,
+      PID:        os.Getpid(),
+      Timeout:    timeout,
+      onEvent:    onEvent
+    )
+
+    if (err = m.claim())
+      return nil, err
+    end
+
+    rootData = @fs.LoopbackRoot.new(Path: root, Dev: uint64(st.Dev))
+    node = @FuseNodeHandler.new(LoopbackNode: @fs.LoopbackNode.new(RootData: rootData), FuseMount: m)
+    rootData.RootNode = node
+
+    var :noCache, time.Duration
+
+    opts = @fs.Options.new(
+      AttrTimeout:     @noCache,
+      EntryTimeout:    @noCache,
+      NegativeTimeout: @noCache,
+      MountOptions: gofuse.MountOptions.new(
+        Name: "openvfs",
+        FsName: root,
+        Options: Array[string].new("auto_unmount")
+      )
+    )
+
+    server, err = fs.Mount(mountpoint, node, opts)
+    if err != nil
+      return nil, err
+    end
+
+    m.Server = server
+
+    return m, nil
+  end
+
+  def RunMount(ctx, root, mountpoint, owner, timeout, onEvent) # (context.Context, string, string, string, time.Duration, func(MountEvent))
+    m, err = NewFuseMount(root, mountpoint, owner, timeout, onEvent)
+    if err
+      log.Warn().Err(err).Str("mountpoint", mountpoint).Msg("mount")
+      return
+    end
+
+    log.Info().Str("root", root).Str("mountpoint", mountpoint).Int("pid", m.PID).Msg("mounted")
+
+    go lambda {
+      ←.ctx.Done()
+      _ = m.Server.Unmount()
+    }.()
+
+    m.Server.Wait()
+
+    log.Info().Str("mountpoint", mountpoint).Msg("unmounted")
+  end
+end

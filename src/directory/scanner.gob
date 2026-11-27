@@ -12,6 +12,49 @@ module Directory
     attr_accessor :ignored, Proc[string, [bool]]
     attr_accessor :journal, @@journal.Journal
 
+    def Apply(event) # (Event)
+      log.Info().Str("kind", event.Kind.String()).Str("path", event.Path).Msg("change")
+
+      if event.Kind == Rescan
+        return
+      end
+
+      if event.Kind == Remove || event.Kind == Rename
+        if (err = self.journal.Forget(event.Path))
+          log.Warn().Err(err).Str("path", event.Path).Msg("forget")
+        end
+
+        return
+      end
+
+      st, err = os.Stat(filepath.Join(self.root, event.Path))
+      if err
+        return
+      end
+
+      if st.IsDir()
+        return
+      end
+
+      inode = InodeOf(st)
+
+      if event.Kind == Create
+        if (old, ok = self.journal.PathByInode(inode))
+          if old != event.Path
+            if (err = self.journal.Forget(old))
+              log.Warn().Err(err).Str("path", old).Msg("forget")
+            end
+
+            log.Debug().Str("from", old).Str("to", event.Path).Msg("renamed")
+          end
+        end
+      end
+
+      if (err = self.journal.Record(event.Path, inode, st.ModTime().Unix(), st.Size()))
+        log.Warn().Err(err).Str("path", event.Path).Msg("record")
+      end
+    end
+
     def Scan(onChange) # (func(Event)) -> error
       seen = make(Hash[string, bool])
 

@@ -1,0 +1,103 @@
+require "context"
+require "errors"
+require "path/filepath"
+require "strconv"
+require "syscall"
+
+require "github.com/hanwen/go-fuse/v2/fs"
+require "github.com/hanwen/go-fuse/v2/fuse", gofuse
+require "golang.org/x/sys/unix"
+
+module Vfs
+  class FuseNodeHandler
+    attr_accessor @@fs.LoopbackNode
+    attr_accessor :FuseMount, @@FuseMount
+
+    def WrapChild(ctx, ops) # (context.Context, fs.InodeEmbedder) -> fs.InodeEmbedder
+      return @FuseNodeHandler.new(LoopbackNode: ops.(@@fs.LoopbackNode), FuseMount: self.FuseMount)
+    end
+
+    def backingPath # () -> string
+      return filepath.Join(self.RootData.Path, self.Path(nil))
+    end
+
+    def Getattr(ctx, f, out) # (context.Context, fs.FileHandle, *gofuse.AttrOut) -> syscall.Errno
+      errno = self.LoopbackNode.Getattr(ctx, f, out)
+      if errno != 0
+        return errno
+      end
+
+      if out.Mode & syscall.S_IFDIR != 0 || out.Size != 0
+        return 0
+      end
+
+      attr, ok = RemoteFileInfoFromAttributes(self.backingPath())
+      if ok && attr.IsOK()
+        out.Size = attr.Size
+      end
+
+      return 0
+    end
+
+    def Open(ctx, flags) # (context.Context, uint32) -> (fs.FileHandle, uint32, syscall.Errno)
+      p = self.backingPath()
+      attr, ok = RemoteFileInfoFromAttributes(p)
+
+      if ok && attr.IsOK() && attr.State == StateDeHydrated
+        c, _ = gofuse.FromContext(ctx)
+
+        errno = self.FuseMount.raise(ctx, MountEvent.new(
+          Kind:   Hydrate,
+          Path:   p,
+          FileID: attr.FileID,
+          Caller: NewFuseClient(c),
+          Reply:  make(Chan[bool], 1)
+        ))
+
+        if errno != 0
+          return nil, 0, errno
+        end
+      end
+
+      return self.LoopbackNode.Open(ctx, flags)
+    end
+
+    def Getxattr(ctx, attr, dest) # (context.Context, string, []byte) -> (uint32, syscall.Errno)
+      p = self.backingPath()
+
+      if attr == XAttrRealSize
+        var :st, unix.Stat_t
+        if (err = unix.Lstat(p, @st))
+          return 0, fs.ToErrno(err)
+        end
+
+        return copyXattr(dest, Array[byte].(strconv.FormatInt(st.Size, 10)))
+      end
+
+      sz, err = unix.Lgetxattr(p, attr, dest)
+
+      if errors.Is(err, unix.ENODATA) && attr == XAttrData
+        return copyXattr(dest, DefaultPlaceHolderData())
+      end
+
+      if err != nil
+        return 0, fs.ToErrno(err)
+      end
+
+      return uint32(sz), 0
+    end
+  end
+
+  def copyXattr(dest, data) # ([]byte, []byte) -> (uint32, syscall.Errno)
+    if len(dest) == 0
+      return uint32(len(data)), 0
+    end
+
+    if len(dest) < len(data)
+      return 0, syscall.ERANGE
+    end
+
+    copy(dest, data)
+    return uint32(len(data)), 0
+  end
+end

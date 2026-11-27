@@ -1,0 +1,32 @@
+require "golang.org/x/sys/unix"
+
+module Vfs
+  var LocalPath = Class.new(string) do
+    protected def GetXAttr(name) # (string) -> ([]byte, error)
+      sz, err = unix.Lgetxattr(string(self), name, nil)
+      if err
+        return nil, err
+      end
+
+      if sz <= 0
+        return Array[byte].new, nil
+      end
+
+      buf = make(Array[byte], sz)
+      n, err = unix.Lgetxattr(string(self), name, buf)
+      if err
+        return nil, err
+      end
+
+      return buf[...n], nil
+    end
+
+    protected def SetXAttr(name, data, flags) # (string, []byte, int) -> error
+      return unix.Lsetxattr(string(self), name, data, flags)
+    end
+
+    protected def RemoveXAttr(name) # (string) -> error
+      return unix.Lremovexattr(string(self), name)
+    end
+  end
+end

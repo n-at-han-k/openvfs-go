@@ -180,10 +180,6 @@ module Directory
     end
 
     def ignored(p) # (string) -> bool
-      if strings.HasPrefix(filepath.Base(p), ".sync_")
-        return true
-      end
-
       if self.ignoredFn != nil
         return self.ignoredFn(p)
       end

@@ -1,0 +1,228 @@
+require "bufio"
+require "context"
+require "encoding/json"
+require "fmt"
+require "net"
+require "strconv"
+require "strings"
+
+require "example.com/project/src/vfs"
+require "github.com/rs/zerolog/log"
+
+module Main
+  var SocketEventKind = Class.new(uint8) do
+    protected def String # () -> string
+      case self
+      when Version
+        return "Version"
+      when Hydrated
+        return "Hydrated"
+      end
+
+      return "Unknown"
+    end
+  end
+
+  const :Version, 1
+  const :Hydrated, 2
+
+  var SocketEvent = Struct.new(
+    Kind: SocketEventKind,
+    ID: int,
+    OK: bool,
+    Error: string,
+    PID: int64
+  )
+
+  class Socket
+    attr_accessor :path,     string
+    attr_accessor :conn,     net.Conn
+    attr_accessor :requests, Chan[vfs.MountEvent]
+
+    attr_accessor :pending,   Hash[int, Chan[bool]]
+    attr_accessor :nextID,    int
+    attr_accessor :clientPID, int64
+
+    def SendMessage(event) # (vfs.MountEvent) -> bool
+      case
+      when self.requests.←.event
+        return true
+      else
+        event.Reply.←.false
+        return false
+      end
+    end
+
+    def RunListener(ctx, onEvent) # (context.Context, func(SocketEvent))
+      if self.conn == nil
+        return
+      end
+
+      defer self.conn.Close()
+
+      if (err = self.send("VERSION", 0, "", "", ""))
+        log.Warn().Err(err).Str("socket", self.path).Msg("socket api")
+        return
+      end
+
+      lines = make(Chan[string], 16)
+      go self.scan(lines)
+
+      loop do
+        case
+        when ←.ctx.Done()
+          return
+        when line, ok = ←.lines
+          unless ok
+            return
+          end
+
+          reply, parsed = self.parse(line)
+          if parsed
+            onEvent(reply)
+          end
+        when event = ←.self.requests
+          self.forward(event)
+        end
+      end
+    end
+
+    def scan(ch) # (chan<- string)
+      defer close(ch)
+
+      scanner = bufio.NewScanner(self.conn)
+
+      loop do
+        unless scanner.Scan()
+          return
+        end
+
+        ch.←.scanner.Text()
+      end
+    end
+
+    def SetClientPID(pid) # (int64)
+      self.clientPID = pid
+    end
+
+    def Finish(id, succeeded) # (int, bool) -> bool
+      reply, waiting = self.pending[id]
+      unless waiting
+        return false
+      end
+
+      delete(self.pending, id)
+      reply.←.succeeded
+
+      return true
+    end
+
+    def forward(event) # (vfs.MountEvent)
+      if event.Caller.IsProcess(self.clientPID)
+        event.Reply.←.true
+        return
+      end
+
+      self.nextID = self.nextID + 1
+      id = self.nextID
+      self.pending[id] = event.Reply
+
+      if (err = self.send("V2/HYDRATE_FILE", id, event.Path, event.FileID, event.Caller.Name()))
+        log.Warn().Err(err).Str("file", event.Path).Msg("hydrate request")
+        self.Finish(id, false)
+        return
+      end
+
+      log.Debug().Int("id", id).Str("file", event.Path).Str("requester", event.Caller.Name()).Msg("hydrate")
+    end
+
+    def parse(line) # (string) -> (SocketEvent, bool)
+      msgType, payload, found = strings.Cut(line, ":")
+      unless found
+        log.Warn().Str("line", line).Msg("socket api")
+        return SocketEvent.new(), false
+      end
+
+      case msgType
+      when "VERSION"
+        fields = strings.Split(payload, ":")
+        if len(fields) != 3
+          return SocketEvent.new(), false
+        end
+
+        pid, err = strconv.ParseInt(fields[2], 10, 64)
+        if err != nil
+          return SocketEvent.new(), false
+        end
+
+        return SocketEvent.new(Kind: Version, PID: pid), true
+      when "V2/HYDRATE_FILE_RESULT"
+        var :m, Hash[string, any]
+        if (err = json.Unmarshal(Array[byte].(payload), @m))
+          log.Warn().Err(err).Str("payload", payload).Msg("socket api")
+          return SocketEvent.new(), false
+        end
+
+        idText, _ = m["id"].(string)
+        id, err = strconv.Atoi(idText)
+        if err != nil
+          log.Warn().Str("payload", payload).Msg("socket api: no transfer id")
+          return SocketEvent.new(), false
+        end
+
+        args, _ = m["arguments"].(Hash[string, any])
+        status, _ = args["status"].(string)
+        failure, _ = args["error"].(string)
+
+        return SocketEvent.new(Kind: Hydrated, ID: id, OK: status == "OK", Error: failure), true
+      end
+
+      return SocketEvent.new(), false
+    end
+
+    def send(msg, id, file, fileID, requester) # (string, int, string, string, string) -> error
+      payload, err = json.Marshal(Hash[string, any].new(
+        "id" => strconv.Itoa(id),
+        "arguments" => Hash[string, string].new(
+          "file" => file,
+          "fileId" => fileID,
+          "requester" => requester
+        )
+      ))
+
+      if err != nil
+        return err
+      end
+
+      if self.conn == nil
+        return fmt.Errorf("socket api %s not connected", self.path)
+      end
+
+      _, werr = self.conn.Write(Array[byte].(fmt.Sprintf("%s:%s\n", msg, string(payload))))
+      if werr != nil
+        self.conn.Close()
+        return werr
+      end
+
+      return nil
+    end
+  end
+
+  def NewSocket(path) # (string) -> *Socket
+    s = @Socket.new(
+      path: path,
+      requests: make(Chan[vfs.MountEvent], 64),
+      pending: make(Hash[int, Chan[bool]])
+    )
+
+    c, err = net.Dial("unix", path)
+    if err
+      log.Warn().Err(err).Str("socket", path).Msg("socket api")
+      return s
+    end
+
+    s.conn = c
+
+    return s
+  end
+end

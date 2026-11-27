@@ -1,0 +1,45 @@
+require "fmt"
+require "os"
+
+require "github.com/hanwen/go-fuse/v2/fuse", gofuse
+
+module Vfs
+  class FuseClient
+    attr_accessor :PID, uint32
+
+    def Name # () -> string
+      if self.PID == 0
+        return "unknown"
+      end
+
+      exe, err = os.Readlink(fmt.Sprintf("/proc/%d/exe", self.PID))
+      if err != nil
+        return fmt.Sprintf("unknown: pid: %d", self.PID)
+      end
+
+      return exe
+    end
+
+    def IsProcess(pid) # (int64) -> bool
+      if self.PID == 0 || pid <= 0
+        return false
+      end
+
+      if int64(self.PID) == pid
+        return true
+      end
+
+      _, err = os.Stat(fmt.Sprintf("/proc/%d/task/%d", pid, self.PID))
+
+      return err == nil
+    end
+  end
+
+  def NewFuseClient(c) # (*gofuse.Caller) -> *FuseClient
+    if c == nil
+      return @FuseClient.new()
+    end
+
+    return @FuseClient.new(PID: c.Pid)
+  end
+end
