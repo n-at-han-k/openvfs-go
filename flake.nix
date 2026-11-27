@@ -20,7 +20,7 @@
           };
           aarch64-linux = {
             platform = "aarch64-linux-gnu";
-            sha256 = "1pw0q28vnllqysx7g9gv6vy2gz6csbiwm8rx37hzbn7zj5pz025j";
+            sha256 = "1pw0q28nvllqysx7g9gv6vy2gz6csbiwm8rx37hzbn7zj5pz025j";
           };
           aarch64-darwin = {
             platform = "arm64-darwin";
@@ -35,19 +35,19 @@
         gobPack = {
           x86_64-linux = {
             platform = "x86_64-linux";
-            sha256 = "0kam028chim7kqgrv08s804f240gnprfsff07hl8hmclgpfrbid4";
+            sha256 = "1b8hdd5pa22wxzpaxy7xv185q28fxfgvnw2grhx2498mz6g4ld5p";
           };
           aarch64-linux = {
             platform = "aarch64-linux";
-            sha256 = "12xiv8izsmycdi2g5hi5a7738yzb0q4phj6s0s6racvv3cvvshlc";
+            sha256 = "0wgbrgapzwmlprs38iz7mbc1avcgc16fgasc97y0cmphiib57yar";
           };
           aarch64-darwin = {
             platform = "arm64-darwin";
-            sha256 = "1d9227nv4vqi8xsrkrki34aczr3y58i71gmx06m4pv2719s2p31d";
+            sha256 = "0sv9xh15lbv07620babfigdsxkif1r08d422gy0pbgcxyym7pdp2";
           };
           x86_64-darwin = {
             platform = "x86_64-darwin";
-            sha256 = "1pi2mm0k8krn4misjn609aqlh79sccnnxwacl9179pkyf2881wap";
+            sha256 = "1s4wdj9h4jgz0jaxvpx613q71b251n020djdi1ig7bqxlix98wks";
           };
         }.${system};
 
