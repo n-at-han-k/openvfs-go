@@ -1,5 +1,7 @@
 require "context"
 require "time"
+require "path/filepath"
+require "os"
 
 require "example.com/project/src/directory"
 require "example.com/project/src/journal"
@@ -26,6 +28,13 @@ module Main
     attr_accessor :journal, @@journal.Journal
 
     def Run(ctx) # (context.Context) -> error
+      path = filepath.Join(self.Mountpoint)
+      err = os.MkdirAll(path, 0755)
+      if err
+        log.Info().Str("setup", path).Msg("mount directory created")
+        return err
+      end
+
       j, err = journal.Open(self.DBPath)
       if err
         return err

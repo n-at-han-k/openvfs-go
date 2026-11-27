@@ -35,15 +35,7 @@ task run: [:build] do
   db = ENV.fetch("DB", "tmp/journal.db")
   socket = ENV.fetch("SOCKET", "tmp/client.sock")
   remote = ENV.fetch("REMOTE", "https://localhost:18473/remote.php/dav/files/admin/")
-  sh(
-    "./#{BUILD_DIR}/openvfs #{Pathname.new(root).expand_path} #{Pathname.new(mountpoint).expand_path}" \
-    "--db #{Pathname.new(db).expand_path}" \
-    "--socket #{Pathname.new(socket).expand_path}" \
-    "--remote #{remote}" \
-    "--remote-user admin" \
-    "--remote-pass admin" \
-    "--remote-insecure"
-  )
+  sh "./#{BUILD_DIR}/openvfs #{Pathname.new(root).expand_path} #{Pathname.new(mountpoint).expand_path} --db #{Pathname.new(db).expand_path} --socket #{Pathname.new(socket).expand_path} --remote #{remote} --remote-user admin --remote-pass admin --remote-insecure"
 end
 
 desc "Transpile every .gob source into #{BUILD_DIR}/"
