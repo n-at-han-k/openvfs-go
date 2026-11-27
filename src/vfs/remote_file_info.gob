@@ -112,7 +112,7 @@ module Vfs
           return nil
         end
 
-        if attr.State == StateDeHydrated && st.Size() == 0 && attr.Etag == etag && attr.FileID == fileID && attr.Size == uint64(size)
+        if attr.State == StateDeHydrated && attr.Etag == etag && attr.FileID == fileID && attr.Size == uint64(size)
           return nil
         end
       end
